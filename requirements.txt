@@ -1,0 +1,3 @@
+pyvisa>=1.13
+fastapi>=0.110
+uvicorn>=0.29

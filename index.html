@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rigol Web Panel</title>
+<style>
+  :root {
+    --bg: #101218; --panel: #181b24; --line: #2a2f3d; --text: #d8dbe3; --muted: #8a90a0;
+    --ch1: #f2e632; --ch2: #4cc9f0; --trig: #ff8a3d; --accent: #6c8cff; --danger: #e5566b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  header { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .idn { color: var(--muted); font-size: 12px; }
+  header .status { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .badge { padding: 2px 8px; border-radius: 10px; background: var(--line); }
+  .badge.stop { background: var(--danger); color: #fff; }
+  main { display: grid; grid-template-columns: 1fr 280px; gap: 12px; padding: 12px; height: calc(100vh - 46px); }
+  main > section { min-width: 0; display: flex; flex-direction: column; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } }
+  .screen { background: #05060a; border: 1px solid var(--line); border-radius: 8px; padding: 6px; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  /* fit the 3:2 screen into the window: as wide as the column allows, but no taller than the room left */
+  canvas { display: block; width: min(100%, calc((100vh - 170px) * 1.5)); height: auto; }
+  .meas { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .meas div { background: var(--panel); border-radius: 6px; padding: 6px 10px; }
+  .meas .c1 { border-left: 3px solid var(--ch1); } .meas .c2 { border-left: 3px solid var(--ch2); }
+  aside { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overflow-x: hidden; min-height: 0; font-size: 13px; padding-right: 4px; }
+  /* fieldsets default to min-width: min-content, which pushed the controls past the panel edge */
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px 8px; margin: 0; background: var(--panel); min-width: 0; }
+  legend { padding: 0 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  legend.c1 { color: var(--ch1); } legend.c2 { color: var(--ch2); }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+  .row label { width: 64px; color: var(--muted); font-size: 12px; }
+  select, input[type=number] { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; }
+  button { background: var(--line); color: var(--text); border: 0; border-radius: 5px; padding: 6px 10px; font: inherit; cursor: pointer; }
+  button:hover { background: #363c4e; }
+  button.primary { background: var(--accent); color: #fff; }
+  button.small { padding: 4px 8px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .err { color: var(--danger); font-size: 12px; min-height: 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Rigol Web Panel</h1>
+  <span class="idn" id="idn">connecting...</span>
+  <span class="status"><span class="badge" id="tstat">-</span> <span id="fps"></span></span>
+</header>
+<main>
+  <section>
+    <div class="screen"><canvas id="scr" width="1200" height="800"></canvas></div>
+    <div class="meas">
+      <div class="c1" id="m1">CH1 -</div>
+      <div class="c2" id="m2">CH2 -</div>
+    </div>
+    <div class="err" id="err"></div>
+  </section>
+  <aside>
+    <fieldset>
+      <legend>Run control</legend>
+      <div class="buttons">
+        <button class="primary" data-act="run">Run</button>
+        <button data-act="stop">Stop</button>
+        <button data-act="single">Single</button>
+        <button data-act="force">Force trig</button>
+        <button data-act="auto">Auto</button>
+        <button data-act="local" title="Unlock the scope's front panel">Release panel</button>
+      </div>
+    </fieldset>
+    <fieldset id="ch1"><legend class="c1">Channel 1</legend></fieldset>
+    <fieldset id="ch2"><legend class="c2">Channel 2</legend></fieldset>
+    <fieldset>
+      <legend>Horizontal</legend>
+      <div class="row"><label>Time/div</label><select id="time.scale"></select></div>
+      <div class="row"><label>Delay, s</label><input type="number" id="time.offset" step="any">
+        <button class="small" data-zero="time.offset">0</button></div>
+    </fieldset>
+    <fieldset>
+      <legend>Trigger</legend>
+      <div class="row"><label>Source</label><select id="trig.source">
+        <option value="CHAN1">CH1</option><option value="CHAN2">CH2</option><option value="EXT">EXT</option></select></div>
+      <div class="row"><label>Slope</label><select id="trig.slope">
+        <option value="POS">Rising</option><option value="NEG">Falling</option></select></div>
+      <div class="row"><label>Sweep</label><select id="trig.sweep">
+        <option value="AUTO">Auto</option><option value="NORM">Normal</option><option value="SING">Single</option></select></div>
+      <div class="row"><label>Level, V</label><input type="number" id="trig.level" step="any">
+        <button class="small" data-act="level50">50%</button></div>
+    </fieldset>
+    <fieldset>
+      <legend>Acquire</legend>
+      <div class="row"><label>Mode</label><select id="acq.type">
+        <option value="NORM">Normal</option><option value="AVER">Average</option><option value="PEAK">Peak detect</option></select></div>
+    </fieldset>
+    <fieldset>
+      <legend>Save</legend>
+      <div class="buttons"><button id="savePng">PNG</button><button id="saveCsv">CSV</button></div>
+    </fieldset>
+  </aside>
+</main>
+<script>
+const VDIV = [0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10];
+const TDIV = [];
+for (let e = -9; e <= 1; e++) for (const m of [1, 2, 5]) { const v = m * 10 ** e; if (v >= 2e-9 && v <= 50) TDIV.push(+v.toPrecision(3)); }
+const COLORS = { 1: '#f2e632', 2: '#4cc9f0' };
+const GRID_X = 12, GRID_Y = 8;
+const cv = document.getElementById('scr'), g = cv.getContext('2d');
+let st = {}, last = null, frames = 0, fpsT = performance.now();
+
+const fmt = (v, unit) => {
+  if (v == null) return '-';
+  const a = Math.abs(v);
+  const [k, p] = a >= 1e6 ? [1e-6, 'M'] : a >= 1e3 ? [1e-3, 'k'] : a >= 1 || a === 0 ? [1, ''] : a >= 1e-3 ? [1e3, 'm'] : a >= 1e-6 ? [1e6, 'µ'] : [1e9, 'n'];
+  return +(v * k).toPrecision(4) + ' ' + p + unit;
+};
+const api = async (path, body) => {
+  const r = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(path + ': ' + r.status);
+  return r.json();
+};
+const showErr = e => { document.getElementById('err').textContent = e ? String(e.message || e) : ''; };
+
+// channel panels are identical, build them from one template
+for (const n of [1, 2]) {
+  document.getElementById('ch' + n).insertAdjacentHTML('beforeend', `
+    <div class="row"><label>Show</label><select id="ch${n}.display"><option value="true">On</option><option value="false">Off</option></select></div>
+    <div class="row"><label>Coupling</label><select id="ch${n}.coupling"><option>DC</option><option>AC</option><option>GND</option></select></div>
+    <div class="row"><label>Volts/div</label><select id="ch${n}.scale"></select></div>
+    <div class="row"><label>Offset, V</label><input type="number" id="ch${n}.offset" step="any">
+      <button class="small" data-zero="ch${n}.offset">0</button></div>
+    <div class="row"><label>Probe</label><select id="ch${n}.probe"><option value="1">1x</option><option value="10">10x</option><option value="100">100x</option></select></div>`);
+}
+for (const n of [1, 2]) for (const v of VDIV) document.getElementById(`ch${n}.scale`).add(new Option(fmt(v, 'V'), v));
+for (const v of TDIV) document.getElementById('time.scale').add(new Option(fmt(v, 's'), v));
+
+// the scope answers with long words ("POSITIVE", "Peak Detect"); match them to the short option values
+function setControl(name, value) {
+  const el = document.getElementById(name);
+  if (!el || !['SELECT', 'INPUT'].includes(el.tagName) || value == null || document.activeElement === el) return;
+  if (el.tagName === 'INPUT') { el.value = +(+value).toPrecision(4); return; }
+  const s = String(value).toUpperCase().replace(/\s/g, '');
+  let best = null;
+  for (const o of el.options) {
+    const ov = o.value.toUpperCase();
+    if (typeof value === 'number' ? Math.abs(+o.value - value) < 1e-12 * Math.max(1, Math.abs(value)) || Math.abs(+o.value / value - 1) < 1e-3 : s === ov || s.startsWith(ov) || s.replace('CH', 'CHAN') === ov) { best = o; break; }
+  }
+  if (best) el.value = best.value;
+}
+async function loadState() {
+  st = await api('/api/state');
+  document.getElementById('idn').textContent = st.idn;
+  for (const [k, v] of Object.entries(st)) setControl(k, v);
+}
+document.querySelectorAll('select, input[type=number]').forEach(el => el.addEventListener('change', async () => {
+  try {
+    let value = el.value;
+    if (value === 'true' || value === 'false') value = value === 'true';
+    const r = await api('/api/set', { name: el.id, value });
+    Object.assign(st, r); setControl(el.id, r[el.id]); showErr();
+  } catch (e) { showErr(e); }
+}));
+document.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', async () => {
+  try { await api('/api/action/' + b.dataset.act, {}); setTimeout(loadState, 300); showErr(); } catch (e) { showErr(e); }
+}));
+document.querySelectorAll('[data-zero]').forEach(b => b.addEventListener('click', () => {
+  const el = document.getElementById(b.dataset.zero); el.value = 0; el.dispatchEvent(new Event('change'));
+}));
+
+function draw(w) {
+  const W = cv.width, H = cv.height, dx = W / GRID_X, dy = H / GRID_Y;
+  g.fillStyle = '#05060a'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = '#1f2533'; g.lineWidth = 1;
+  for (let i = 0; i <= GRID_X; i++) { g.beginPath(); g.moveTo(i * dx, 0); g.lineTo(i * dx, H); g.stroke(); }
+  for (let i = 0; i <= GRID_Y; i++) { g.beginPath(); g.moveTo(0, i * dy); g.lineTo(W, i * dy); g.stroke(); }
+  g.strokeStyle = '#323a4e'; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+  if (!w) return;
+  const toY = (v, c) => H / 2 - (v + c.offset) / c.scale * dy;
+  for (const [n, c] of Object.entries(w.ch)) {
+    g.strokeStyle = COLORS[n]; g.lineWidth = 2; g.beginPath();
+    c.v.forEach((v, i) => { const x = i * W / c.v.length, y = toY(v, c); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+    // ground marker on the left edge, pinned to the edge when the ground is off screen
+    const gy = Math.min(H - 10, Math.max(10, toY(0, c))); g.fillStyle = COLORS[n];
+    g.beginPath(); g.moveTo(0, gy - 8); g.lineTo(14, gy); g.lineTo(0, gy + 8); g.fill();
+    g.font = 'bold 13px system-ui'; g.fillStyle = '#05060a'; g.fillText(n, 2, gy + 5);
+  }
+  // trigger level marker on the right edge, on the trigger source's scale
+  const src = String(st['trig.source'] || '').replace(/\D/g, ''), tc = w.ch[src];
+  if (tc && st['trig.level'] != null) {
+    const ty = toY(st['trig.level'], tc); g.fillStyle = '#ff8a3d';
+    g.beginPath(); g.moveTo(W, ty - 8); g.lineTo(W - 14, ty); g.lineTo(W, ty + 8); g.fill();
+  }
+  // trigger time marker on top
+  const tx = W / 2 - w.toffset / w.tscale * dx;
+  if (tx >= 0 && tx <= W) { g.fillStyle = '#ff8a3d'; g.beginPath(); g.moveTo(tx - 8, 0); g.lineTo(tx + 8, 0); g.lineTo(tx, 12); g.fill(); }
+  // scale labels in the top corners, clear of the ground markers
+  g.font = '18px system-ui'; let x = 24;
+  for (const [n, c] of Object.entries(w.ch)) { g.fillStyle = COLORS[n]; g.fillText(`CH${n} ${fmt(c.scale, 'V')}/div`, x, 26); x += 170; }
+  g.fillStyle = '#d8dbe3'; g.textAlign = 'right'; g.fillText(`${fmt(w.tscale, 's')}/div`, W - 24, 26); g.textAlign = 'left';
+}
+
+async function waveLoop() {
+  for (;;) {
+    try {
+      last = await api('/api/wave');
+      draw(last);
+      const b = document.getElementById('tstat'); b.textContent = last.status; b.classList.toggle('stop', /STOP/i.test(last.status));
+      frames++; showErr();
+    } catch (e) { showErr(e); await new Promise(r => setTimeout(r, 1000)); }
+    const now = performance.now();
+    if (now - fpsT > 2000) { document.getElementById('fps').textContent = (frames * 1000 / (now - fpsT)).toFixed(1) + ' fps'; frames = 0; fpsT = now; }
+  }
+}
+async function measureLoop() {
+  for (;;) {
+    try {
+      const m = await api('/api/measure');
+      for (const n of [1, 2]) {
+        const v = m[n];
+        document.getElementById('m' + n).textContent = v ? `CH${n}  Vpp ${fmt(v.vpp, 'V')}   Vavg ${fmt(v.vavg, 'V')}   Freq ${fmt(v.freq, 'Hz')}` : `CH${n} off`;
+      }
+    } catch (e) { /* the wave loop reports errors */ }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
+const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+function download(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
+document.getElementById('savePng').onclick = () => cv.toBlob(b => download(`scope-${stamp()}.png`, b));
+document.getElementById('saveCsv').onclick = () => {
+  if (!last) return;
+  const chs = Object.keys(last.ch), n = Math.max(...chs.map(c => last.ch[c].v.length));
+  const rows = ['t_s,' + chs.map(c => 'ch' + c + '_V').join(',')];
+  for (let i = 0; i < n; i++) rows.push([((i - n / 2) * last.dt + last.toffset).toExponential(5), ...chs.map(c => last.ch[c].v[i])].join(','));
+  download(`scope-${stamp()}.csv`, new Blob([rows.join('\n')], { type: 'text/csv' }));
+};
+
+draw(null);
+loadState().catch(showErr).finally(() => { waveLoop(); measureLoop(); });
+// a full state read is ~20 queries (2+ s on this scope), so only now and then to catch front panel changes
+setInterval(() => loadState().catch(() => {}), 15000);
+</script>
+</body>
+</html>
