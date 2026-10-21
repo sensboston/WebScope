@@ -22,6 +22,21 @@ by default the first Rigol found).
 The server listens on 127.0.0.1 by default. Use `--host 0.0.0.0` to reach it from other machines
 (and allow the port in the firewall).
 
+## Start with Windows
+
+`install_autostart.ps1` (run once from an elevated PowerShell) registers a scheduled task that starts
+the server at boot as the given user, listening on the network, and restarts it if it crashes:
+
+```
+powershell -ExecutionPolicy Bypass -File install_autostart.ps1 -User <user> [-Port 8765]
+```
+
+The server output goes to `C:\ProgramData\RigolWeb\server.log`. Open the port in the firewall, e.g.
+`netsh advfirewall firewall add rule name="Rigol Web Panel" dir=in action=allow protocol=TCP localport=8765 remoteip=localsubnet`.
+
+The server survives the scope being switched off or unplugged: the page shows OFFLINE and the
+connection comes back by itself.
+
 ## Notes on the DS1000E
 
 - The scope ignores commands sent too close together; the server keeps at least 0.12 s between

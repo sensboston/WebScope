@@ -11,25 +11,26 @@ from pathlib import Path
 import pyvisa
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 CMD_GAP_S = 0.12        # the DS1000E drops commands sent closer than this (UltraScope uses the same gap)
 WAVE_POINTS = 600       # "normal" points mode returns the 600 on-screen samples
 SCREEN_DIVS_X = 12
 
-# Settings the page may change: name -> (SCPI write template, SCPI query, type)
+# Settings the page may change: name -> (SCPI write template, SCPI query, type).
+# The order matters when applying a preset: probe before scale, trigger source before level.
 SETTINGS = {
     "ch1.display":  (":CHAN1:DISP {}", ":CHAN1:DISP?", "onoff"),
     "ch1.coupling": (":CHAN1:COUP {}", ":CHAN1:COUP?", "str"),
+    "ch1.probe":    (":CHAN1:PROB {}", ":CHAN1:PROB?", "float"),
     "ch1.scale":    (":CHAN1:SCAL {}", ":CHAN1:SCAL?", "float"),
     "ch1.offset":   (":CHAN1:OFFS {}", ":CHAN1:OFFS?", "float"),
-    "ch1.probe":    (":CHAN1:PROB {}", ":CHAN1:PROB?", "float"),
     "ch2.display":  (":CHAN2:DISP {}", ":CHAN2:DISP?", "onoff"),
     "ch2.coupling": (":CHAN2:COUP {}", ":CHAN2:COUP?", "str"),
+    "ch2.probe":    (":CHAN2:PROB {}", ":CHAN2:PROB?", "float"),
     "ch2.scale":    (":CHAN2:SCAL {}", ":CHAN2:SCAL?", "float"),
     "ch2.offset":   (":CHAN2:OFFS {}", ":CHAN2:OFFS?", "float"),
-    "ch2.probe":    (":CHAN2:PROB {}", ":CHAN2:PROB?", "float"),
     "time.scale":   (":TIM:SCAL {}", ":TIM:SCAL?", "float"),
     "time.offset":  (":TIM:OFFS {}", ":TIM:OFFS?", "float"),
     "trig.source":  (":TRIG:EDGE:SOUR {}", ":TRIG:EDGE:SOUR?", "str"),
@@ -49,50 +50,102 @@ ACTIONS = {
     "local":  [":KEY:FORC"],     # give the front panel back
 }
 
+# Last known settings. Every query costs CMD_GAP_S, so the waveform loop reads scales from here
+# instead of asking the scope each frame; /api/state refreshes it (also catches front panel changes).
+cache = {}
+
 MEASURES = {"vpp": ":MEAS:VPP? CHAN{}", "vavg": ":MEAS:VAV? CHAN{}", "freq": ":MEAS:FREQ? CHAN{}"}
 
 
+class ScopeOffline(Exception):
+    pass
+
+
 class Scope:
-    """Serialised SCPI access with the minimum gap the DS1000E needs between commands."""
+    """Serialised SCPI access with the minimum gap the DS1000E needs between commands.
+
+    Survives the scope being off or unplugged: any VISA error drops the session, and the next
+    call tries to reopen it (at most every RECONNECT_S), raising ScopeOffline until it is back.
+    """
+
+    RECONNECT_S = 2.0
 
     def __init__(self, resource=None):
         self.rm = pyvisa.ResourceManager()
-        if resource is None:
-            found = [r for r in self.rm.list_resources() if "0X1AB1" in r.upper()]   # Rigol USB vendor id
-            if not found:
-                raise SystemExit("No Rigol scope found by VISA")
-            resource = found[0]
-        self.dev = self.rm.open_resource(resource)
-        self.dev.timeout = 3000
+        self.resource = resource
+        self.dev = None
+        self.idn = ""
         self.lock = threading.Lock()
         self.last = 0.0
-        self.idn = self.query("*IDN?")
+        self.next_try = 0.0
+
+    def _connect(self):
+        if self.dev is not None:
+            return
+        if time.monotonic() < self.next_try:
+            raise ScopeOffline("scope offline")
+        self.next_try = time.monotonic() + self.RECONNECT_S
+        try:
+            name = self.resource
+            if name is None:
+                found = [r for r in self.rm.list_resources() if "0X1AB1" in r.upper()]   # Rigol USB vendor id
+                if not found:
+                    raise ScopeOffline("no Rigol scope found")
+                name = found[0]
+            dev = self.rm.open_resource(name)
+            dev.timeout = 3000
+            self.idn = dev.query("*IDN?").strip()
+            dev.write(":WAV:POIN:MODE NOR")
+            self.dev = dev
+            self.last = time.monotonic()
+            print(f"Connected: {self.idn}", flush=True)
+            cache.clear()                      # settings may have changed while we were away
+        except pyvisa.Error as e:
+            raise ScopeOffline(f"scope offline ({e})")
+
+    def _drop(self):
+        print("Scope lost", flush=True)
+        try:
+            self.dev.close()
+        except Exception:
+            pass
+        self.dev = None
 
     def _gap(self):
         wait = CMD_GAP_S - (time.monotonic() - self.last)
         if wait > 0:
             time.sleep(wait)
 
-    def write(self, cmd):
+    def _io(self, fn):
         with self.lock:
+            self._connect()
             self._gap()
-            self.dev.write(cmd)
-            self.last = time.monotonic()
+            try:
+                return fn(self.dev)
+            except pyvisa.Error as e:
+                self._drop()
+                raise ScopeOffline(f"scope offline ({e})")
+            finally:
+                self.last = time.monotonic()
+
+    def write(self, cmd):
+        self._io(lambda d: d.write(cmd))
 
     def query(self, cmd):
-        with self.lock:
-            self._gap()
-            reply = self.dev.query(cmd).strip()
-            self.last = time.monotonic()
-            return reply
+        return self._io(lambda d: d.query(cmd).strip())
 
     def query_raw(self, cmd):
-        with self.lock:
-            self._gap()
-            self.dev.write(cmd)
-            data = self.dev.read_raw()
-            self.last = time.monotonic()
-            return data
+        def ask(d):
+            d.write(cmd)
+            return d.read_raw()
+        return self._io(ask)
+
+    def release(self):
+        """Unlock the front panel if the scope is there; never raises."""
+        try:
+            self.write(":KEY:FORC")
+        except ScopeOffline:
+            pass
 
 
 def parse_value(kind, text):
@@ -134,6 +187,11 @@ def read_measure(text):
 
 
 app = FastAPI()
+
+
+@app.exception_handler(ScopeOffline)
+def offline_handler(request, exc):
+    return JSONResponse(status_code=503, content={"offline": True, "detail": str(exc)})
 scope: Scope = None
 HERE = Path(__file__).parent
 
@@ -146,11 +204,6 @@ class SetReq(BaseModel):
 @app.get("/")
 def index():
     return FileResponse(HERE / "index.html")
-
-
-# Last known settings. Every query costs CMD_GAP_S, so the waveform loop reads scales from here
-# instead of asking the scope each frame; /api/state refreshes it (also catches front panel changes).
-cache = {}
 
 
 @app.get("/api/state")
@@ -170,6 +223,15 @@ def set_value(req: SetReq):
     return {req.name: cache[req.name]}
 
 
+@app.post("/api/apply")
+def apply(values: dict):
+    """Apply a saved preset: write every known setting in SETTINGS order, then read the state back."""
+    for name, (w, _, kind) in SETTINGS.items():
+        if name in values and values[name] is not None:
+            scope.write(w.format(format_value(kind, values[name])))
+    return state()
+
+
 @app.post("/api/action/{name}")
 def action(name: str):
     if name not in ACTIONS:
@@ -181,10 +243,11 @@ def action(name: str):
 
 @app.get("/api/wave")
 def wave():
+    status = scope.query(":TRIG:STAT?")      # first, so a reconnect (which clears the cache) happens here
     if not cache:
         state()
     tscale, toffs = cache["time.scale"], cache["time.offset"]
-    out = {"tscale": tscale, "toffset": toffs, "status": scope.query(":TRIG:STAT?"), "ch": {}}
+    out = {"tscale": tscale, "toffset": toffs, "status": status, "ch": {}}
     for ch in (1, 2):
         if not cache[f"ch{ch}.display"]:
             continue
@@ -215,12 +278,11 @@ def main():
     args = ap.parse_args()
     global scope
     scope = Scope(args.resource)
-    print(f"Connected: {scope.idn}")
-    scope.write(":WAV:POIN:MODE NOR")
+    print(f"Serving on http://{args.host}:{args.port}/", flush=True)
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:
-        scope.write(":KEY:FORC")
+        scope.release()
 
 
 if __name__ == "__main__":

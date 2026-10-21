@@ -17,28 +17,36 @@
   header .status { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
   .badge { padding: 2px 8px; border-radius: 10px; background: var(--line); }
   .badge.stop { background: var(--danger); color: #fff; }
-  main { display: grid; grid-template-columns: 1fr 280px; gap: 12px; padding: 12px; height: calc(100vh - 46px); }
+  main { display: grid; grid-template-columns: 1fr 390px; gap: 12px; padding: 12px; height: calc(100vh - 46px); }
   main > section { min-width: 0; display: flex; flex-direction: column; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; height: auto; } }
   .screen { background: #05060a; border: 1px solid var(--line); border-radius: 8px; padding: 6px; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
   /* fit the 3:2 screen into the window: as wide as the column allows, but no taller than the room left */
   canvas { display: block; width: min(100%, calc((100vh - 170px) * 1.5)); height: auto; }
   .meas { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 8px; font-variant-numeric: tabular-nums; }
   .meas div { background: var(--panel); border-radius: 6px; padding: 6px 10px; }
   .meas .c1 { border-left: 3px solid var(--ch1); } .meas .c2 { border-left: 3px solid var(--ch2); }
-  aside { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overflow-x: hidden; min-height: 0; font-size: 13px; padding-right: 4px; }
+  /* two columns: CH1 | CH2, then related pairs below; .wide blocks span both */
+  aside { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; overflow-y: auto; overflow-x: hidden; min-height: 0; font-size: 13px; padding-right: 4px; }
+  aside .wide { grid-column: 1 / -1; }
   /* fieldsets default to min-width: min-content, which pushed the controls past the panel edge */
   fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px 8px; margin: 0; background: var(--panel); min-width: 0; }
   legend { padding: 0 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   legend.c1 { color: var(--ch1); } legend.c2 { color: var(--ch2); }
   .row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-  .row label { width: 64px; color: var(--muted); font-size: 12px; }
-  select, input[type=number] { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; }
+  .row label { width: 54px; flex: none; color: var(--muted); font-size: 12px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  select, input[type=number], input[type=text] { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; }
   button { background: var(--line); color: var(--text); border: 0; border-radius: 5px; padding: 6px 10px; font: inherit; cursor: pointer; }
   button:hover { background: #363c4e; }
   button.primary { background: var(--accent); color: #fff; }
   button.small { padding: 4px 8px; }
+  /* green = "this is in effect": Remote while the page drives the scope, Auto until a setting changes */
+  button.lit { background: #2f9e5b; color: #fff; }
+  button.lit:hover { background: #38b56a; }
   .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .buttons.one-line { flex-wrap: nowrap; gap: 4px; }
+  .buttons.one-line button { flex: 1 1 auto; padding: 6px 4px; white-space: nowrap; }
   .err { color: var(--danger); font-size: 12px; min-height: 1em; }
 </style>
 </head>
@@ -58,15 +66,15 @@
     <div class="err" id="err"></div>
   </section>
   <aside>
-    <fieldset>
+    <fieldset class="wide">
       <legend>Run control</legend>
-      <div class="buttons">
+      <div class="buttons one-line">
         <button class="primary" data-act="run">Run</button>
         <button data-act="stop">Stop</button>
         <button data-act="single">Single</button>
         <button data-act="force">Force trig</button>
-        <button data-act="auto">Auto</button>
-        <button data-act="local" title="Unlock the scope's front panel">Release panel</button>
+        <button id="autoBtn" title="Let the scope pick the settings; stays green until something is changed">Auto</button>
+        <button id="panelBtn" class="lit" title="Green: the page drives the scope. Click to pause it and give the scope's own buttons back">Remote</button>
       </div>
     </fieldset>
     <fieldset id="ch1"><legend class="c1">Channel 1</legend></fieldset>
@@ -97,6 +105,14 @@
       <legend>Save</legend>
       <div class="buttons"><button id="savePng">PNG</button><button id="saveCsv">CSV</button></div>
     </fieldset>
+    <fieldset class="wide">
+      <legend>Presets</legend>
+      <div class="row"><select id="presetList"></select>
+        <button class="small" id="presetLoad">Load</button><button class="small" id="presetDel">Delete</button></div>
+      <div class="row"><input type="text" id="presetName" placeholder="Preset name">
+        <button class="small" id="presetSave">Save</button></div>
+      <div class="row"><span id="presetMsg" class="muted"></span></div>
+    </fieldset>
   </aside>
 </main>
 <script>
@@ -116,7 +132,7 @@ const fmt = (v, unit) => {
 };
 const api = async (path, body) => {
   const r = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(path + ': ' + r.status);
+  if (!r.ok) { const e = new Error(r.status === 503 ? 'Scope offline - waiting for it to come back' : path + ': ' + r.status); e.status = r.status; throw e; }
   return r.json();
 };
 const showErr = e => { document.getElementById('err').textContent = e ? String(e.message || e) : ''; };
@@ -147,17 +163,34 @@ function setControl(name, value) {
   }
   if (best) el.value = best.value;
 }
+// Auto stays lit while the settings are still the ones the scope picked
+let autoSnap = null;
+const settingsOf = s => JSON.stringify(Object.entries(s).filter(([k]) => k !== 'idn' && k !== 'trig.status').sort());
+function autoOff() { autoSnap = null; document.getElementById('autoBtn').classList.remove('lit'); }
+
 async function loadState() {
   st = await api('/api/state');
   document.getElementById('idn').textContent = st.idn;
   for (const [k, v] of Object.entries(st)) setControl(k, v);
+  if (autoSnap && settingsOf(st) !== autoSnap) autoOff();      // changed on the scope itself
 }
-document.querySelectorAll('select, input[type=number]').forEach(el => el.addEventListener('change', async () => {
+document.getElementById('autoBtn').onclick = async () => {
+  const b = document.getElementById('autoBtn');
+  try {
+    autoOff(); b.textContent = 'Auto...';
+    await api('/api/action/auto', {});
+    await new Promise(r => setTimeout(r, 4000));   // the scope needs a few seconds to settle
+    await loadState();
+    autoSnap = settingsOf(st); b.classList.add('lit'); showErr();
+  } catch (e) { showErr(e); }
+  b.textContent = 'Auto';
+};
+document.querySelectorAll('aside select[id*="."], aside input[id*="."]').forEach(el => el.addEventListener('change', async () => {
   try {
     let value = el.value;
     if (value === 'true' || value === 'false') value = value === 'true';
     const r = await api('/api/set', { name: el.id, value });
-    Object.assign(st, r); setControl(el.id, r[el.id]); showErr();
+    Object.assign(st, r); setControl(el.id, r[el.id]); showErr(); autoOff();
   } catch (e) { showErr(e); }
 }));
 document.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', async () => {
@@ -200,20 +233,40 @@ function draw(w) {
   g.fillStyle = '#d8dbe3'; g.textAlign = 'right'; g.fillText(`${fmt(w.tscale, 's')}/div`, W - 24, 26); g.textAlign = 'left';
 }
 
+// "Remote" toggle: the scope locks its buttons on every remote command, so while the user works
+// on the scope itself the page must stop talking to it, not just send one unlock.
+let panelFree = false;
+const idle = () => new Promise(r => setTimeout(r, 300));
+document.getElementById('panelBtn').onclick = async () => {
+  panelFree = !panelFree;
+  document.getElementById('panelBtn').classList.toggle('lit', !panelFree);
+  document.getElementById('tstat').textContent = panelFree ? 'PANEL' : '-';
+  if (panelFree) { await new Promise(r => setTimeout(r, 1200)); await api('/api/action/local', {}).catch(showErr); }
+  else loadState().catch(showErr);           // pick up whatever was changed on the scope meanwhile
+};
+
+let offline = false;
 async function waveLoop() {
   for (;;) {
+    if (panelFree) { await idle(); continue; }
     try {
       last = await api('/api/wave');
       draw(last);
       const b = document.getElementById('tstat'); b.textContent = last.status; b.classList.toggle('stop', /STOP/i.test(last.status));
       frames++; showErr();
-    } catch (e) { showErr(e); await new Promise(r => setTimeout(r, 1000)); }
+      if (offline) { offline = false; loadState().catch(() => {}); }   // back: settings may have changed
+    } catch (e) {
+      showErr(e);
+      if (e.status === 503) { offline = true; document.getElementById('tstat').textContent = 'OFFLINE'; }
+      await new Promise(r => setTimeout(r, 1000));
+    }
     const now = performance.now();
     if (now - fpsT > 2000) { document.getElementById('fps').textContent = (frames * 1000 / (now - fpsT)).toFixed(1) + ' fps'; frames = 0; fpsT = now; }
   }
 }
 async function measureLoop() {
   for (;;) {
+    if (panelFree) { await idle(); continue; }
     try {
       const m = await api('/api/measure');
       for (const n of [1, 2]) {
@@ -236,10 +289,47 @@ document.getElementById('saveCsv').onclick = () => {
   download(`scope-${stamp()}.csv`, new Blob([rows.join('\n')], { type: 'text/csv' }));
 };
 
+// ---- presets: named snapshots of the control values, kept in this browser's localStorage ----
+const PRESET_KEY = 'rigolweb.presets';
+const SETTING_IDS = [...document.querySelectorAll('aside select[id*="."], aside input[id*="."]')].map(el => el.id);
+const presetMsg = t => { document.getElementById('presetMsg').textContent = t; };
+function readPresets() { try { return JSON.parse(localStorage.getItem(PRESET_KEY)) || {}; } catch (e) { return {}; } }
+function writePresets(p) { try { localStorage.setItem(PRESET_KEY, JSON.stringify(p)); } catch (e) { presetMsg('cannot save: storage unavailable'); } }
+function listPresets(select) {
+  const sel = document.getElementById('presetList'), names = Object.keys(readPresets()).sort();
+  sel.innerHTML = ''; names.forEach(n => sel.add(new Option(n, n)));
+  if (select) sel.value = select;
+}
+document.getElementById('presetSave').onclick = async () => {
+  const name = document.getElementById('presetName').value.trim() || document.getElementById('presetList').value;
+  if (!name) { presetMsg('enter a name'); return; }
+  try {
+    await loadState();                        // catch front panel changes before taking the snapshot
+    const snap = {};
+    for (const id of SETTING_IDS) { const v = document.getElementById(id).value; snap[id] = v === 'true' ? true : v === 'false' ? false : v; }
+    const p = readPresets(); p[name] = snap; writePresets(p);
+    listPresets(name); document.getElementById('presetName').value = ''; presetMsg('saved');
+  } catch (e) { showErr(e); }
+};
+document.getElementById('presetLoad').onclick = async () => {
+  const name = document.getElementById('presetList').value, snap = readPresets()[name];
+  if (!snap) return;
+  presetMsg('applying...');
+  autoOff();
+  try { st = await api('/api/apply', snap); for (const [k, v] of Object.entries(st)) setControl(k, v); presetMsg('loaded ' + name); }
+  catch (e) { showErr(e); presetMsg(''); }
+};
+document.getElementById('presetDel').onclick = () => {
+  const name = document.getElementById('presetList').value;
+  if (!name || !confirm(`Delete preset "${name}"?`)) return;
+  const p = readPresets(); delete p[name]; writePresets(p); listPresets(); presetMsg('deleted');
+};
+listPresets();
+
 draw(null);
 loadState().catch(showErr).finally(() => { waveLoop(); measureLoop(); });
 // a full state read is ~20 queries (2+ s on this scope), so only now and then to catch front panel changes
-setInterval(() => loadState().catch(() => {}), 15000);
+setInterval(() => { if (!panelFree) loadState().catch(() => {}); }, 15000);
 </script>
 </body>
 </html>
