@@ -31,7 +31,7 @@ the server at boot as the given user, listening on the network, and restarts it 
 powershell -ExecutionPolicy Bypass -File install_autostart.ps1 -User <user> [-Port 8765]
 ```
 
-The server output goes to `C:\ProgramData\RigolWeb\server.log`. Open the port in the firewall, e.g.
+The server output goes to `C:\ProgramData\WebScope\server.log`. Open the port in the firewall, e.g.
 `netsh advfirewall firewall add rule name="WebScope" dir=in action=allow protocol=TCP localport=8765 remoteip=localsubnet`.
 
 The server survives the scope being switched off or unplugged: the page shows OFFLINE and the
