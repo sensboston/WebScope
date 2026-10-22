@@ -4,6 +4,7 @@ Runs next to the scope (VISA must see it) and serves a single page:
     python server.py [--port 8765] [--host 127.0.0.1] [--resource USB0::...::INSTR]
 """
 import argparse
+import base64
 import threading
 import time
 from pathlib import Path
@@ -319,6 +320,28 @@ def wave():
         volts = [round((240 - b) * (scale / 25) - (offs + scale * 4.6), 5) for b in data]
         out["ch"][ch] = {"scale": scale, "offset": offs, "v": volts}
     out["dt"] = tscale * SCREEN_DIVS_X / WAVE_POINTS
+    return out
+
+
+@app.post("/api/deep")
+def deep():
+    """Stop the scope and read its whole acquisition memory (8192 points per channel with two channels
+    on, normal memory depth; firmware 00.04.x times out on long memory). The scope stays stopped."""
+    if not cache:
+        state()
+    scope.write(":STOP")
+    scope.write(":WAV:POIN:MODE RAW")
+    out = {"tscale": cache["time.scale"], "toffset": cache["time.offset"], "ch": {}}
+    try:
+        for ch in (1, 2):
+            if not cache[f"ch{ch}.display"]:
+                continue
+            rate = float(scope.query(f":ACQ:SAMP? CHAN{ch}"))
+            data = decode_block(scope.query_raw(f":WAV:DATA? CHAN{ch}"))
+            out["ch"][ch] = {"scale": cache[f"ch{ch}.scale"], "offset": cache[f"ch{ch}.offset"],
+                             "rate": rate, "raw": base64.b64encode(data).decode()}
+    finally:
+        scope.write(":WAV:POIN:MODE NOR")
     return out
 
 

@@ -58,6 +58,8 @@
   header #advBtn { padding: 3px 10px; font-size: 12px; }
   .checks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px 8px; margin-top: 4px; font-size: 12px; }
   .checks label { display: flex; gap: 4px; align-items: center; color: var(--text); white-space: nowrap; }
+  /* one fixed-height line each, so changing numbers never move the controls */
+  .readline { height: 18px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
   .readout { font-variant-numeric: tabular-nums; font-size: 12px; margin-top: 4px; color: var(--text); white-space: pre-line; }
   canvas.dragging { cursor: grabbing; }
   .row.place { gap: 3px; }
@@ -129,6 +131,16 @@
     <fieldset>
       <legend>Save</legend>
       <div class="buttons"><button id="savePng">PNG</button><button id="saveCsv">CSV</button></div>
+    </fieldset>
+    <fieldset class="wide adv-only">
+      <legend>Deep capture &amp; FFT</legend>
+      <div class="row"><label>FFT</label>
+        <select id="fftCh" style="flex: none; width: 80px"><option value="off">Off</option><option value="1">CH1</option><option value="2">CH2</option></select>
+        <span style="flex: 1"></span>
+        <button class="small" id="deepBtn" title="Stop the scope and read its whole memory: 8192 points per channel">Capture</button>
+        <button class="small" id="liveBtn" title="Back to the live screen (starts the scope)">Live</button></div>
+      <div class="readline muted" id="deepOut"></div>
+      <div class="readline muted" id="fftOut"></div>
     </fieldset>
     <fieldset class="wide adv-only">
       <legend>Measure</legend>
@@ -247,6 +259,7 @@ document.querySelectorAll('[data-zero]').forEach(b => b.addEventListener('click'
 }));
 
 function draw(w) {
+  if (w && fftOn()) { drawFFT(w); return; }
   const W = cv.width, H = cv.height, dx = W / GRID_X, dy = H / GRID_Y;
   g.fillStyle = '#05060a'; g.fillRect(0, 0, W, H);
   g.strokeStyle = '#1f2533'; g.lineWidth = 1;
@@ -310,7 +323,7 @@ function setLocal() {
 }
 async function waveLoop() {
   for (;;) {
-    if (panelFree) { await idle(); continue; }
+    if (panelFree || deep) { await idle(); continue; }      // deep capture: the scope is stopped, show the snapshot
     try {
       const w = await api('/api/wave');
       if (connId !== null && w.conn !== connId) {         // the scope came back after a power cycle:
@@ -333,7 +346,8 @@ async function waveLoop() {
   }
 }
 let lastMeas = null;
-const measText = (k, x) => x == null ? '-' : MEAS[k][1] === '%' ? +x.toPrecision(3) + ' %' : fmt(x, MEAS[k][1]);
+// the scope reports duty cycle, overshoot and preshoot as fractions, shown here in percent
+const measText = (k, x) => x == null ? '-' : MEAS[k][1] === '%' ? +(x * 100).toPrecision(3) + ' %' : fmt(x, MEAS[k][1]);
 
 // largest 3:2 canvas that fits the screen box (which gets whatever height the chips leave)
 const screenBox = document.querySelector('.screen');
@@ -392,6 +406,12 @@ document.getElementById('savePng').onclick = () => {
   out.toBlob(b => download(`scope-${stamp()}.png`, b));
 };
 document.getElementById('saveCsv').onclick = () => {
+  if (deep) {                     // the whole capture, not just the visible window
+    const chs = Object.keys(deep.ch), rows = ['t_s,' + chs.map(c => 'ch' + c + '_V').join(',')];
+    for (let i = 0; i < deep.n; i++) rows.push([deepT(i).toExponential(6), ...chs.map(c => +deep.ch[c].v[i].toFixed(5))].join(','));
+    download(`scope-deep-${stamp()}.csv`, new Blob([rows.join('\n')], { type: 'text/csv' }));
+    return;
+  }
   if (!last) return;
   const chs = Object.keys(last.ch), n = Math.max(...chs.map(c => last.ch[c].v.length));
   const rows = ['t_s,' + chs.map(c => 'ch' + c + '_V').join(',')];
@@ -498,7 +518,7 @@ let markerDrag = null;
 const step25 = scale => scale / 25;
 const snap = (v, s) => Math.round(v / s) * s;
 function markerAt(fx, fy) {
-  if (!last || panelFree) return null;
+  if (!last || panelFree || deep || fftOn()) return null;
   const W = cv.width, H = cv.height, dy = H / GRID_Y, x = fx * W, y = fy * H;
   const toY = (v, c) => H / 2 - (v + c.offset) / c.scale * dy;
   if (x < 40) for (const [n, c] of Object.entries(last.ch)) {
@@ -556,6 +576,162 @@ function placeChannel(n, divs) {
 document.querySelectorAll('[data-place]').forEach(b => b.addEventListener('click', () => {
   const [n, divs] = b.dataset.place.split(':'); placeChannel(n, +divs);
 }));
+
+// ---- deep capture: the scope's whole memory (8192 points per channel), zoom with the wheel, pan by dragging ----
+let deep = null;                  // { ch: { n: { v, scale, offset } }, dt, n, toffset }
+const view = { c: 0, span: 0 };   // shown window: centre time and width, seconds
+const deepMsg = t => { document.getElementById('deepOut').textContent = t; };
+
+document.getElementById('deepBtn').onclick = async () => {
+  if (panelFree) { showErr(new Error('Press Remote first')); return; }
+  deepMsg('reading...');
+  try {
+    const r = await api('/api/deep', {});
+    const ch = {};
+    let dt = 0, n = 0;
+    for (const [k, c] of Object.entries(r.ch)) {
+      const bytes = Uint8Array.from(atob(c.raw), x => x.charCodeAt(0));
+      const v = new Float32Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) v[i] = (240 - bytes[i]) * (c.scale / 25) - (c.offset + c.scale * 4.6);
+      ch[k] = { v, scale: c.scale, offset: c.offset };
+      dt = 1 / c.rate; n = bytes.length;
+    }
+    if (!n) { deepMsg('no channel on'); return; }
+    deep = { ch, dt, n, toffset: r.toffset };
+    view.c = r.toffset; view.span = r.tscale * GRID_X;      // start with what the screen showed
+    document.getElementById('tstat').textContent = 'DEEP';
+    renderDeep(); showErr();
+  } catch (e) { showErr(e); deepMsg(''); }
+};
+document.getElementById('liveBtn').onclick = async () => {
+  if (!deep) return;
+  deep = null; deepMsg('');
+  try { await api('/api/action/run', {}); } catch (e) { showErr(e); }
+};
+
+// time of sample i: t = 0 sits at index n/2 - 1 when the delay is zero
+const deepT = i => (i - (deep.n / 2 - 1)) * deep.dt + deep.toffset;
+const deepI = t => (t - deep.toffset) / deep.dt + deep.n / 2 - 1;
+
+// a screen-shaped frame of the visible window: min and max per pixel column, so short spikes stay visible
+function deepFrame() {
+  const cols = 600, w = { tscale: view.span / GRID_X, toffset: view.c, ch: {}, dt: deep.dt, deep: true };
+  for (const [k, c] of Object.entries(deep.ch)) {
+    const out = new Array(cols * 2);
+    for (let col = 0; col < cols; col++) {
+      const t0 = view.c + (col / cols - 0.5) * view.span, t1 = t0 + view.span / cols;
+      let a = Math.max(0, Math.floor(deepI(t0))), b = Math.min(deep.n - 1, Math.ceil(deepI(t1)));
+      if (b < a) { out[col * 2] = out[col * 2 + 1] = NaN; continue; }
+      let lo = Infinity, hi = -Infinity;
+      for (let i = a; i <= b; i++) { const x = c.v[i]; if (x < lo) lo = x; if (x > hi) hi = x; }
+      out[col * 2] = lo; out[col * 2 + 1] = hi;
+    }
+    w.ch[k] = { scale: c.scale, offset: c.offset, v: out };
+  }
+  return w;
+}
+function renderDeep() {
+  if (!deep) return;
+  const full = deep.n * deep.dt;
+  view.span = Math.min(full, Math.max(deep.dt * 20, view.span));
+  last = deepFrame(); draw(last);
+  deepMsg(`${deep.n} pts, ${fmt(1 / deep.dt, 'Sa/s')}, view ${fmt(view.span, 's')} of ${fmt(full, 's')}`);
+}
+cv.addEventListener('wheel', e => {
+  if (!deep) return;
+  e.preventDefault();
+  const r = cv.getBoundingClientRect(), f = (e.clientX - r.left) / r.width;
+  const tAt = view.c + (f - 0.5) * view.span, k = e.deltaY > 0 ? 1.25 : 0.8;
+  view.span *= k; view.c = tAt - (f - 0.5) * view.span;          // keep the time under the pointer in place
+  renderDeep();
+}, { passive: false });
+let pan = null;
+cv.addEventListener('mousedown', e => {
+  if (!deep || curDrag || markerDrag || fftOn()) return;
+  pan = { x: e.clientX, c: view.c }; cv.classList.add('dragging');
+});
+window.addEventListener('mousemove', e => {
+  if (!pan) return;
+  const r = cv.getBoundingClientRect();
+  view.c = pan.c - (e.clientX - pan.x) / r.width * view.span; renderDeep();
+});
+window.addEventListener('mouseup', () => { if (pan) { pan = null; cv.classList.remove('dragging'); } });
+
+// ---- FFT of what is on screen (live 600 points, or the visible part of a deep capture), Hann window ----
+const fftOn = () => document.getElementById('fftCh').value !== 'off' && document.body.classList.contains('adv');
+function fftMag(x) {
+  // radix-2, in place; x.length is a power of two
+  const n = x.length, re = Float64Array.from(x), im = new Float64Array(n);
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const a = -2 * Math.PI / len, wr = Math.cos(a), wi = Math.sin(a);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k], ui = im[i + k];
+        const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci, vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k] = ur + vr; im[i + k] = ui + vi; re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+        [cr, ci] = [cr * wr - ci * wi, cr * wi + ci * wr];
+      }
+    }
+  }
+  const mag = new Float64Array(n / 2);
+  for (let i = 0; i < n / 2; i++) mag[i] = Math.hypot(re[i], im[i]);
+  return mag;
+}
+function fftSamples(w) {
+  const n = document.getElementById('fftCh').value;
+  if (deep) {                     // the real samples of the visible window, not the min/max frame
+    const c = deep.ch[n]; if (!c) return null;
+    const a = Math.max(0, Math.floor(deepI(view.c - view.span / 2))), b = Math.min(deep.n, Math.ceil(deepI(view.c + view.span / 2)));
+    return { n, x: c.v.slice(a, b), fs: 1 / deep.dt };
+  }
+  const c = w.ch[n]; if (!c) return null;
+  return { n, x: c.v, fs: c.v.length / (GRID_X * w.tscale) };
+}
+function drawFFT(w) {
+  // plot area inset from the canvas edges: dB labels go to the left of it, Hz labels below
+  const W = cv.width, H = cv.height, L = 92, T = 44, R = 24, B = 40, PW = W - L - R, PH = H - T - B;
+  const s = fftSamples(w);
+  g.fillStyle = '#05060a'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = '#1f2533'; g.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) { g.beginPath(); g.moveTo(L + i * PW / 10, T); g.lineTo(L + i * PW / 10, T + PH); g.stroke(); }
+  for (let i = 0; i <= 8; i++) { g.beginPath(); g.moveTo(L, T + i * PH / 8); g.lineTo(L + PW, T + i * PH / 8); g.stroke(); }
+  if (!s || s.x.length < 64) { document.getElementById('fftOut').textContent = 'not enough data'; return; }
+  let N = 1; while (N * 2 <= s.x.length) N *= 2;
+  const x = s.x.slice(0, N), mean = x.reduce((p, v) => p + v, 0) / N;
+  const win = i => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1));
+  const mag = fftMag(Array.from(x, (v, i) => (v - mean) * win(i)));
+  // volts rms per bin: 2/N for one-sided, /0.5 for the Hann window's coherent gain, /sqrt2 for rms
+  const vrms = Array.from(mag, m => m * 2 / N / 0.5 / Math.SQRT2);
+  const db = vrms.map(v => 20 * Math.log10(Math.max(v, 1e-9)));        // dBV
+  const fNyq = s.fs / 2, df = s.fs / N, TOP = 10, DB_DIV = 10;        // +10 dBV at the top, 10 dB/div
+  const yOf = d => T + Math.min(PH, Math.max(0, (TOP - d) / (DB_DIV * 8) * PH));
+  g.save(); g.beginPath(); g.rect(L, T, PW, PH); g.clip();
+  g.strokeStyle = COLORS[s.n]; g.lineWidth = 2; g.beginPath();
+  db.forEach((d, i) => { const px = L + i / db.length * PW, py = yOf(d); i ? g.lineTo(px, py) : g.moveTo(px, py); });
+  g.stroke(); g.restore();
+  let pk = 1; for (let i = 2; i < vrms.length; i++) if (vrms[i] > vrms[pk]) pk = i;
+  g.font = '18px system-ui'; g.fillStyle = COLORS[s.n]; g.textBaseline = 'alphabetic';
+  g.fillText(`FFT CH${s.n}   ${DB_DIV} dB/div   ${fmt(fNyq / 10, 'Hz')}/div   resolution ${fmt(df, 'Hz')}`, L, 28);
+  g.font = '15px system-ui'; g.fillStyle = '#8a90a0';
+  g.textAlign = 'right';
+  for (let i = 0; i <= 8; i++) g.fillText(`${TOP - i * DB_DIV} dBV`, L - 8, T + i * PH / 8 + 5);
+  g.textAlign = 'center';
+  for (let i = 0; i <= 10; i += 2) g.fillText(fmt(fNyq * i / 10, 'Hz'), L + i * PW / 10, T + PH + 24);
+  g.textAlign = 'left';
+  document.getElementById('fftOut').textContent =
+    `peak ${fmt(pk * df, 'Hz')}  ${fmt(vrms[pk], 'V')} rms (${db[pk].toFixed(1)} dBV), ${N} points`;
+}
+document.getElementById('fftCh').addEventListener('change', () => {
+  if (!fftOn()) document.getElementById('fftOut').textContent = '';
+  if (deep) renderDeep(); else if (last && !panelFree) draw(last);
+});
 
 // ---- presets: named snapshots of the control values, kept in this browser's localStorage ----
 const PRESET_KEY = 'rigolweb.presets';
