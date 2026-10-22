@@ -17,15 +17,20 @@
   header .status { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
   .badge { padding: 2px 8px; border-radius: 10px; background: var(--line); }
   .badge.stop { background: var(--danger); color: #fff; }
-  main { display: grid; grid-template-columns: 1fr 390px; gap: 12px; padding: 12px; height: calc(100vh - 46px); }
+  main { display: grid; grid-template-columns: 1fr 420px; gap: 12px; padding: 12px; height: calc(100vh - 46px); }
   main > section { min-width: 0; display: flex; flex-direction: column; }
   @media (max-width: 1100px) { main { grid-template-columns: 1fr; height: auto; } }
   .screen { background: #05060a; border: 1px solid var(--line); border-radius: 8px; padding: 6px; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
-  /* fit the 3:2 screen into the window: as wide as the column allows, but no taller than the room left */
-  canvas { display: block; width: min(100%, calc((100vh - 170px) * 1.5)); height: auto; }
+  /* the 3:2 screen is sized by script (fitScreen) to the room the box gets, so the measurement chips
+     below can take as many lines as they need without a page scroll */
+  canvas { display: block; }
   .meas { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 8px; font-variant-numeric: tabular-nums; }
-  .meas div { background: var(--panel); border-radius: 6px; padding: 6px 10px; }
-  .meas .c1 { border-left: 3px solid var(--ch1); } .meas .c2 { border-left: 3px solid var(--ch2); }
+  .meas .grp { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; border-radius: 6px; border: 1px solid var(--line); border-left-width: 3px; min-height: 34px; align-content: flex-start; }
+  .meas .c1 { border-left-color: var(--ch1); } .meas .c2 { border-left-color: var(--ch2); }
+  .chip { background: var(--panel); border-radius: 4px; padding: 2px 8px; white-space: nowrap; font-size: 13px; }
+  .chip b { font-weight: 600; margin-left: 6px; }
+  .chip.c1 b { color: var(--ch1); } .chip.c2 b { color: var(--ch2); }
+  .chip.off { color: var(--muted); }
   /* two columns: CH1 | CH2, then related pairs below; .wide blocks span both */
   aside { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; overflow-y: auto; overflow-x: hidden; min-height: 0; font-size: 13px; padding-right: 4px; }
   aside .wide { grid-column: 1 / -1; }
@@ -55,7 +60,8 @@
   .checks label { display: flex; gap: 4px; align-items: center; color: var(--text); white-space: nowrap; }
   .readout { font-variant-numeric: tabular-nums; font-size: 12px; margin-top: 4px; color: var(--text); white-space: pre-line; }
   canvas.dragging { cursor: grabbing; }
-  .row.place button { flex: 1 1 0; min-width: 0; padding: 4px 2px; }
+  .row.place { gap: 3px; }
+  .row.place button { flex: 1 1 auto; min-width: 0; padding: 4px 1px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -69,8 +75,8 @@
   <section>
     <div class="screen"><canvas id="scr" width="1200" height="800"></canvas></div>
     <div class="meas">
-      <div class="c1" id="m1">CH1 -</div>
-      <div class="c2" id="m2">CH2 -</div>
+      <div class="grp c1" id="m1"></div>
+      <div class="grp c2" id="m2"></div>
     </div>
     <div class="err" id="err"></div>
   </section>
@@ -326,18 +332,33 @@ async function waveLoop() {
     if (now - fpsT > 2000) { document.getElementById('fps').textContent = (frames * 1000 / (now - fpsT)).toFixed(1) + ' fps'; frames = 0; fpsT = now; }
   }
 }
+let lastMeas = null;
+const measText = (k, x) => x == null ? '-' : MEAS[k][1] === '%' ? +x.toPrecision(3) + ' %' : fmt(x, MEAS[k][1]);
+
+// largest 3:2 canvas that fits the screen box (which gets whatever height the chips leave)
+const screenBox = document.querySelector('.screen');
+function fitScreen() {
+  const w = screenBox.clientWidth - 14, h = screenBox.clientHeight - 14;
+  const narrow = window.innerWidth <= 1100;                   // stacked layout: fit by width only
+  const cw = Math.max(200, narrow ? w : Math.min(w, h * 1.5));
+  cv.style.width = cw + 'px'; cv.style.height = cw / 1.5 + 'px';
+}
+new ResizeObserver(fitScreen).observe(screenBox);
+window.addEventListener('resize', fitScreen);
+
 async function measureLoop() {
   for (;;) {
     if (panelFree) { await idle(); continue; }
     try {
       const keys = measKeys();
       const m = await api('/api/measure?keys=' + keys.join(','));
-      const show = (k, x) => x == null ? '-' : MEAS[k][1] === '%' ? +x.toPrecision(3) + ' %' : fmt(x, MEAS[k][1]);
+      lastMeas = { keys, m };
       for (const n of [1, 2]) {
         const v = m[n];
-        document.getElementById('m' + n).textContent = !v ? `CH${n} off` :
-          `CH${n}  ` + keys.map(k => `${MEAS[k][0]} ${show(k, v[k])}`).join('   ');
+        document.getElementById('m' + n).innerHTML = !v ? '<span class="chip off">off</span>' :
+          keys.map(k => `<span class="chip c${n}">${MEAS[k][0]}<b>${measText(k, v[k])}</b></span>`).join('');
       }
+      fitScreen();
     } catch (e) { /* the wave loop reports errors */ }
     await new Promise(r => setTimeout(r, 2000));
   }
@@ -345,7 +366,31 @@ async function measureLoop() {
 
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 function download(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
-document.getElementById('savePng').onclick = () => cv.toBlob(b => download(`scope-${stamp()}.png`, b));
+document.getElementById('savePng').onclick = () => {
+  const rows = [];
+  if (lastMeas) for (const n of [1, 2]) {
+    const v = lastMeas.m[n];
+    if (v) rows.push([n, lastMeas.keys.map(k => [MEAS[k][0], measText(k, v[k])])]);
+  }
+  const lineH = 30, pad = 14, out = document.createElement('canvas');
+  out.width = cv.width; out.height = cv.height + pad * 2 + (rows.length + 1) * lineH;     // + a line for the time
+  const o = out.getContext('2d');
+  o.fillStyle = '#05060a'; o.fillRect(0, 0, out.width, out.height);
+  o.drawImage(cv, 0, 0);
+  o.font = '17px system-ui'; o.textBaseline = 'middle';
+  rows.forEach(([n, items], i) => {
+    const y = cv.height + pad + i * lineH + lineH / 2;
+    o.fillStyle = COLORS[n]; o.fillRect(12, y - 11, 4, 22);
+    let x = 26;
+    for (const [name, val] of items) {
+      o.fillStyle = '#8a90a0'; o.fillText(name, x, y); x += o.measureText(name).width + 6;
+      o.fillStyle = COLORS[n]; o.fillText(val, x, y); x += o.measureText(val).width + 22;
+    }
+  });
+  o.fillStyle = '#8a90a0';
+  o.fillText(new Date().toLocaleString(), 26, cv.height + pad + rows.length * lineH + lineH / 2);
+  out.toBlob(b => download(`scope-${stamp()}.png`, b));
+};
 document.getElementById('saveCsv').onclick = () => {
   if (!last) return;
   const chs = Object.keys(last.ch), n = Math.max(...chs.map(c => last.ch[c].v.length));
