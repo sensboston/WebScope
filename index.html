@@ -55,6 +55,7 @@
   .checks label { display: flex; gap: 4px; align-items: center; color: var(--text); white-space: nowrap; }
   .readout { font-variant-numeric: tabular-nums; font-size: 12px; margin-top: 4px; color: var(--text); white-space: pre-line; }
   canvas.dragging { cursor: grabbing; }
+  .row.place button { flex: 1 1 0; min-width: 0; padding: 4px 2px; }
 </style>
 </head>
 <body>
@@ -174,6 +175,10 @@ for (const n of [1, 2]) {
     <div class="row"><label>Volts/div</label><select id="ch${n}.scale"></select></div>
     <div class="row"><label>Offset, V</label><input type="number" id="ch${n}.offset" step="any">
       <button class="small" data-zero="ch${n}.offset">0</button></div>
+    <div class="row place"><label>Position</label>
+      <button class="small" data-place="${n}:0" title="Middle of the signal to the screen centre">Center</button>
+      <button class="small" data-place="${n}:2" title="Middle of the signal to the centre of the upper half">Up</button>
+      <button class="small" data-place="${n}:-2" title="Middle of the signal to the centre of the lower half">Down</button></div>
     <div class="row"><label>Probe</label><select id="ch${n}.probe"><option value="1">1x</option><option value="10">10x</option><option value="100">100x</option></select></div>
     <div class="row adv-only"><label>Invert</label><select id="ch${n}.invert"><option value="false">Off</option><option value="true">On</option></select></div>
     <div class="row adv-only"><label>BW 20M</label><select id="ch${n}.bwlimit"><option value="false">Off</option><option value="true">On</option></select></div>
@@ -206,6 +211,7 @@ async function loadState(full = true) {
   document.getElementById('idn').textContent = st.idn;
   for (const [k, v] of Object.entries(st)) setControl(k, v);
   for (const n of [1, 2]) setControl('fine' + n, st[`ch${n}.scale`]);
+  offsetSteps();
   if (autoSnap && settingsOf(st) !== autoSnap) autoOff();      // changed on the scope itself
 }
 document.getElementById('autoBtn').onclick = async () => {
@@ -300,11 +306,13 @@ async function waveLoop() {
   for (;;) {
     if (panelFree) { await idle(); continue; }
     try {
-      last = await api('/api/wave');
-      if (connId !== null && last.conn !== connId) {      // the scope came back after a power cycle:
-        connId = last.conn; setLocal(); continue;         // hand control back to its own buttons
+      const w = await api('/api/wave');
+      if (connId !== null && w.conn !== connId) {         // the scope came back after a power cycle:
+        connId = w.conn; setLocal(); continue;            // hand control back to its own buttons
       }
-      connId = last.conn;
+      connId = w.conn;
+      if (markerDrag) continue;                           // keep the dragged preview on screen
+      last = w;
       draw(last);
       const b = document.getElementById('tstat'); b.textContent = last.status; b.classList.toggle('stop', /STOP/i.test(last.status));
       frames++; showErr();
@@ -438,6 +446,71 @@ for (const id of ['curMode', 'curCh']) document.getElementById(id).addEventListe
   if (last && !panelFree) draw(last);
   if (!cursorsOn()) document.getElementById('curOut').textContent = 'Drag the dashed lines on the screen';
 });
+
+// ---- position by mouse: drag a channel's ground marker (offset) or the trigger marker (level) ----
+// The scope moves in 1/25 of a division, so that is the step here too.
+let markerDrag = null;
+const step25 = scale => scale / 25;
+const snap = (v, s) => Math.round(v / s) * s;
+function markerAt(fx, fy) {
+  if (!last || panelFree) return null;
+  const W = cv.width, H = cv.height, dy = H / GRID_Y, x = fx * W, y = fy * H;
+  const toY = (v, c) => H / 2 - (v + c.offset) / c.scale * dy;
+  if (x < 40) for (const [n, c] of Object.entries(last.ch)) {
+    if (Math.abs(Math.min(H - 10, Math.max(10, toY(0, c))) - y) < 18) return { type: 'off', n };
+  }
+  const src = String(st['trig.source'] || '').replace(/\D/g, ''), tc = last.ch[src];
+  if (x > W - 40 && tc && st['trig.level'] != null && Math.abs(toY(st['trig.level'], tc) - y) < 18) return { type: 'lev', n: src };
+  return null;
+}
+cv.addEventListener('mousedown', e => {
+  const r = cv.getBoundingClientRect(), m = markerAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+  if (!m) return;
+  markerDrag = m; cv.classList.add('dragging');
+  e.preventDefault(); e.stopImmediatePropagation();          // don't let the cursors grab it too
+}, true);
+window.addEventListener('mousemove', e => {
+  if (!markerDrag) return;
+  const r = cv.getBoundingClientRect(), H = cv.height, dy = H / GRID_Y;
+  const y = (e.clientY - r.top) / r.height * H, c = last.ch[markerDrag.n];
+  const atY = (H / 2 - y) / dy * c.scale;                    // volts the pointer is at, before the offset
+  if (markerDrag.type === 'off') { c.offset = snap(atY, step25(c.scale)); markerDrag.value = c.offset; }
+  else { st['trig.level'] = snap(atY - c.offset, step25(c.scale)); markerDrag.value = st['trig.level']; }
+  draw(last);
+});
+window.addEventListener('mouseup', async () => {
+  const m = markerDrag; if (!m) return;
+  markerDrag = null; cv.classList.remove('dragging');
+  if (m.value == null) return;
+  await setSetting(m.type === 'off' ? `ch${m.n}.offset` : 'trig.level', +m.value.toFixed(6));
+});
+
+async function setSetting(name, value) {
+  try {
+    const r = await api('/api/set', { name, value });
+    Object.assign(st, r); setControl(name, r[name]); autoOff(); offsetSteps(); showErr();
+  } catch (e) { showErr(e); }
+}
+
+// arrows in the Offset fields move by the scope's own step: 1/25 div of the channel's scale
+function offsetSteps() {
+  for (const n of [1, 2]) {
+    const s = st[`ch${n}.scale`];
+    if (s) document.getElementById(`ch${n}.offset`).step = +step25(s).toPrecision(3);
+  }
+}
+
+// Center / Up / Down: put the middle of the signal (between its max and min) at the screen centre,
+// or at the centre of the upper / lower half, so two signals can be laid out without fiddling
+function placeChannel(n, divs) {
+  const c = last && last.ch[n];
+  if (!c || !c.v.length) { showErr(new Error(`CH${n}: no signal on screen yet`)); return; }
+  const mid = (Math.max(...c.v) + Math.min(...c.v)) / 2;
+  setSetting(`ch${n}.offset`, +snap(divs * c.scale - mid, step25(c.scale)).toFixed(6));
+}
+document.querySelectorAll('[data-place]').forEach(b => b.addEventListener('click', () => {
+  const [n, divs] = b.dataset.place.split(':'); placeChannel(n, +divs);
+}));
 
 // ---- presets: named snapshots of the control values, kept in this browser's localStorage ----
 const PRESET_KEY = 'rigolweb.presets';
