@@ -1,4 +1,4 @@
-"""Browser front panel for Rigol DS1000E/D oscilloscopes (DS1052E, DS1102E, ...) over USB.
+"""WebScope: browser front panel for Rigol DS1000E/D oscilloscopes (DS1052E, DS1102E, ...) over USB.
 
 Runs next to the scope (VISA must see it) and serves a single page:
     python server.py [--port 8765] [--host 127.0.0.1] [--resource USB0::...::INSTR]

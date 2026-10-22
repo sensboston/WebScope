@@ -1,6 +1,6 @@
-# Rigol Web Panel
+# WebScope
 
-Browser front panel for Rigol DS1000E/D oscilloscopes (DS1052E, DS1102E, ...) connected over USB.
+A browser front panel for Rigol DS1000E/D oscilloscopes (DS1052E, DS1102E, ...) connected over USB.
 
 These scopes have no network port, and the vendor software (UltraScope) is hard to use. This is a
 small Python server that runs on the computer the scope is plugged into and serves one web page:
@@ -32,7 +32,7 @@ powershell -ExecutionPolicy Bypass -File install_autostart.ps1 -User <user> [-Po
 ```
 
 The server output goes to `C:\ProgramData\RigolWeb\server.log`. Open the port in the firewall, e.g.
-`netsh advfirewall firewall add rule name="Rigol Web Panel" dir=in action=allow protocol=TCP localport=8765 remoteip=localsubnet`.
+`netsh advfirewall firewall add rule name="WebScope" dir=in action=allow protocol=TCP localport=8765 remoteip=localsubnet`.
 
 The server survives the scope being switched off or unplugged: the page shows OFFLINE and the
 connection comes back by itself.

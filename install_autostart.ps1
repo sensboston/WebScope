@@ -6,8 +6,8 @@ param(
     [string]$User = $env:USERNAME,
     [int]$Port = 8765,
     [string]$Python = "",
-    [string]$TaskName = "Rigol Web Panel",
-    [string]$LogDir = "C:\ProgramData\RigolWeb"
+    [string]$TaskName = "WebScope",
+    [string]$LogDir = "C:\ProgramData\WebScope"
 )
 $ErrorActionPreference = "Stop"
 
@@ -19,14 +19,14 @@ $log = Join-Path $LogDir "server.log"
 
 # A task that runs without a logon needs the "Log on as a batch job" right, which plain users don't have.
 $sid = (New-Object System.Security.Principal.NTAccount($User)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-$cfg = Join-Path $env:TEMP "rigolweb_rights.inf"
+$cfg = Join-Path $env:TEMP "webscope_rights.inf"
 secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null
 $line = (Get-Content $cfg | Where-Object { $_ -like "SeBatchLogonRight*" })
 if (-not $line -or $line -notmatch [regex]::Escape("*$sid")) {
     $new = if ($line) { "$line,*$sid" } else { "SeBatchLogonRight = *$sid" }
     @("[Unicode]", "Unicode=yes", "[Version]", 'signature="$CHICAGO$"', "Revision=1", "[Privilege Rights]", $new) |
         Out-File $cfg -Encoding unicode
-    secedit /configure /db (Join-Path $env:TEMP "rigolweb_rights.sdb") /cfg $cfg /areas USER_RIGHTS | Out-Null
+    secedit /configure /db (Join-Path $env:TEMP "webscope_rights.sdb") /cfg $cfg /areas USER_RIGHTS | Out-Null
     Write-Host "Granted 'Log on as a batch job' to $User"
 }
 Remove-Item $cfg -ErrorAction SilentlyContinue
