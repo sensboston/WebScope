@@ -74,7 +74,7 @@
         <button data-act="single">Single</button>
         <button data-act="force">Force trig</button>
         <button id="autoBtn" title="Let the scope pick the settings; stays green until something is changed">Auto</button>
-        <button id="panelBtn" class="lit" title="Green: the page drives the scope. Click to pause it and give the scope's own buttons back">Remote</button>
+        <button id="panelBtn" title="Green: the page drives the scope. Grey: the scope's own buttons are free (default)">Remote</button>
       </div>
     </fieldset>
     <fieldset id="ch1"><legend class="c1">Channel 1</legend></fieldset>
@@ -235,22 +235,32 @@ function draw(w) {
 
 // "Remote" toggle: the scope locks its buttons on every remote command, so while the user works
 // on the scope itself the page must stop talking to it, not just send one unlock.
-let panelFree = false;
+let panelFree = true;          // start in Local: never grab the scope until asked
 const idle = () => new Promise(r => setTimeout(r, 300));
 document.getElementById('panelBtn').onclick = async () => {
   panelFree = !panelFree;
   document.getElementById('panelBtn').classList.toggle('lit', !panelFree);
-  document.getElementById('tstat').textContent = panelFree ? 'PANEL' : '-';
-  if (panelFree) { await new Promise(r => setTimeout(r, 1200)); await api('/api/action/local', {}).catch(showErr); }
+  document.getElementById('tstat').textContent = panelFree ? 'LOCAL' : '-';
+  if (panelFree) { await new Promise(r => setTimeout(r, 1200)); await api('/api/action/local', {}).catch(showErr); drawLocal(); }
   else loadState().catch(showErr);           // pick up whatever was changed on the scope meanwhile
 };
 
-let offline = false;
+let offline = false, connId = null;
+function setLocal() {
+  panelFree = true;
+  document.getElementById('panelBtn').classList.remove('lit');
+  api('/api/action/local', {}).catch(() => {});
+  drawLocal();
+}
 async function waveLoop() {
   for (;;) {
     if (panelFree) { await idle(); continue; }
     try {
       last = await api('/api/wave');
+      if (connId !== null && last.conn !== connId) {      // the scope came back after a power cycle:
+        connId = last.conn; setLocal(); continue;         // hand control back to its own buttons
+      }
+      connId = last.conn;
       draw(last);
       const b = document.getElementById('tstat'); b.textContent = last.status; b.classList.toggle('stop', /STOP/i.test(last.status));
       frames++; showErr();
@@ -326,8 +336,16 @@ document.getElementById('presetDel').onclick = () => {
 };
 listPresets();
 
-draw(null);
-loadState().catch(showErr).finally(() => { waveLoop(); measureLoop(); });
+function drawLocal() {
+  draw(null);
+  g.fillStyle = '#8a90a0'; g.font = '28px system-ui'; g.textAlign = 'center';
+  g.fillText("Local: the scope's own buttons are active", cv.width / 2, cv.height / 2 - 20);
+  g.fillText('Press Remote to drive it from here', cv.width / 2, cv.height / 2 + 24);
+  g.textAlign = 'left';
+  document.getElementById('tstat').textContent = 'LOCAL';
+}
+drawLocal();
+waveLoop(); measureLoop();
 // a full state read is ~20 queries (2+ s on this scope), so only now and then to catch front panel changes
 setInterval(() => { if (!panelFree) loadState().catch(() => {}); }, 15000);
 </script>

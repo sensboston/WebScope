@@ -69,6 +69,7 @@ class Scope:
     """
 
     RECONNECT_S = 2.0
+    IDLE_RELEASE_S = 5.0    # nobody asked for this long (page closed or in Local mode): unlock the front panel
 
     def __init__(self, resource=None):
         self.rm = pyvisa.ResourceManager()
@@ -78,6 +79,15 @@ class Scope:
         self.lock = threading.Lock()
         self.last = 0.0
         self.next_try = 0.0
+        self.locked = False     # True after any command, until the front panel is given back
+        self.conn_id = 0        # bumped on every (re)connect, so the page can tell the scope was power cycled
+        threading.Thread(target=self._idle_watch, daemon=True).start()
+
+    def _idle_watch(self):
+        while True:
+            time.sleep(1.0)
+            if self.locked and time.monotonic() - self.last > self.IDLE_RELEASE_S:
+                self.release()
 
     def _connect(self):
         if self.dev is not None:
@@ -97,6 +107,7 @@ class Scope:
             self.idn = dev.query("*IDN?").strip()
             dev.write(":WAV:POIN:MODE NOR")
             self.dev = dev
+            self.conn_id += 1
             self.last = time.monotonic()
             print(f"Connected: {self.idn}", flush=True)
             cache.clear()                      # settings may have changed while we were away
@@ -121,6 +132,7 @@ class Scope:
             self._connect()
             self._gap()
             try:
+                self.locked = True
                 return fn(self.dev)
             except pyvisa.Error as e:
                 self._drop()
@@ -146,6 +158,7 @@ class Scope:
             self.write(":KEY:FORC")
         except ScopeOffline:
             pass
+        self.locked = False
 
 
 def parse_value(kind, text):
@@ -247,7 +260,7 @@ def wave():
     if not cache:
         state()
     tscale, toffs = cache["time.scale"], cache["time.offset"]
-    out = {"tscale": tscale, "toffset": toffs, "status": status, "ch": {}}
+    out = {"tscale": tscale, "toffset": toffs, "status": status, "conn": scope.conn_id, "ch": {}}
     for ch in (1, 2):
         if not cache[f"ch{ch}.display"]:
             continue
