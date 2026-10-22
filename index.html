@@ -48,13 +48,21 @@
   .buttons.one-line { flex-wrap: nowrap; gap: 4px; }
   .buttons.one-line button { flex: 1 1 auto; padding: 6px 4px; white-space: nowrap; }
   .err { color: var(--danger); font-size: 12px; min-height: 1em; }
+  /* Basic / Advanced: advanced rows and blocks are hidden unless body.adv */
+  body:not(.adv) .adv-only { display: none !important; }
+  header #advBtn { padding: 3px 10px; font-size: 12px; }
+  .checks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px 8px; margin-top: 4px; font-size: 12px; }
+  .checks label { display: flex; gap: 4px; align-items: center; color: var(--text); white-space: nowrap; }
+  .readout { font-variant-numeric: tabular-nums; font-size: 12px; margin-top: 4px; color: var(--text); white-space: pre-line; }
+  canvas.dragging { cursor: grabbing; }
 </style>
 </head>
 <body>
 <header>
   <h1>Rigol Web Panel</h1>
   <span class="idn" id="idn">connecting...</span>
-  <span class="status"><span class="badge" id="tstat">-</span> <span id="fps"></span></span>
+  <span class="status"><button id="advBtn" title="Show the advanced settings">Advanced</button>
+    <span class="badge" id="tstat">-</span> <span id="fps"></span></span>
 </header>
 <main>
   <section>
@@ -84,6 +92,8 @@
       <div class="row"><label>Time/div</label><select id="time.scale"></select></div>
       <div class="row"><label>Delay, s</label><input type="number" id="time.offset" step="any">
         <button class="small" data-zero="time.offset">0</button></div>
+      <div class="row adv-only"><label>Format</label><select id="time.format">
+        <option value="YT">Y-T</option><option value="XY">X-Y</option><option value="SCANNING">Roll</option></select></div>
     </fieldset>
     <fieldset>
       <legend>Trigger</legend>
@@ -95,15 +105,34 @@
         <option value="AUTO">Auto</option><option value="NORM">Normal</option><option value="SING">Single</option></select></div>
       <div class="row"><label>Level, V</label><input type="number" id="trig.level" step="any">
         <button class="small" data-act="level50">50%</button></div>
+      <div class="row adv-only"><label>Coupling</label><select id="trig.coupling">
+        <option value="DC">DC</option><option value="AC">AC</option><option value="HF">HF reject</option><option value="LF">LF reject</option></select></div>
+      <div class="row adv-only"><label>Holdoff, s</label><input type="number" id="trig.holdoff" step="any" min="0.0000005" max="1.5"></div>
+      <div class="row adv-only"><label>Sens, div</label><input type="number" id="trig.sensitivity" step="0.1" min="0.1" max="1"></div>
     </fieldset>
     <fieldset>
       <legend>Acquire</legend>
       <div class="row"><label>Mode</label><select id="acq.type">
         <option value="NORM">Normal</option><option value="AVER">Average</option><option value="PEAK">Peak detect</option></select></div>
+      <div class="row adv-only"><label>Averages</label><select id="acq.averages">
+        <option>2</option><option>4</option><option>8</option><option>16</option><option>32</option><option>64</option><option>128</option><option>256</option></select></div>
+      <div class="row adv-only"><label>Memory</label><select id="acq.memdepth">
+        <option value="NORMAL">Normal</option><option value="LONG">Long</option></select></div>
     </fieldset>
     <fieldset>
       <legend>Save</legend>
       <div class="buttons"><button id="savePng">PNG</button><button id="saveCsv">CSV</button></div>
+    </fieldset>
+    <fieldset class="wide adv-only">
+      <legend>Measure</legend>
+      <div class="checks" id="measChecks"></div>
+    </fieldset>
+    <fieldset class="wide adv-only">
+      <legend>Cursors</legend>
+      <div class="row"><label>Show</label><select id="curMode">
+        <option value="off">Off</option><option value="t">Time</option><option value="v">Voltage</option><option value="tv">Both</option></select>
+        <label>Channel</label><select id="curCh"><option value="1">CH1</option><option value="2">CH2</option></select></div>
+      <div class="readout" id="curOut">Drag the dashed lines on the screen</div>
     </fieldset>
     <fieldset class="wide">
       <legend>Presets</legend>
@@ -145,7 +174,11 @@ for (const n of [1, 2]) {
     <div class="row"><label>Volts/div</label><select id="ch${n}.scale"></select></div>
     <div class="row"><label>Offset, V</label><input type="number" id="ch${n}.offset" step="any">
       <button class="small" data-zero="ch${n}.offset">0</button></div>
-    <div class="row"><label>Probe</label><select id="ch${n}.probe"><option value="1">1x</option><option value="10">10x</option><option value="100">100x</option></select></div>`);
+    <div class="row"><label>Probe</label><select id="ch${n}.probe"><option value="1">1x</option><option value="10">10x</option><option value="100">100x</option></select></div>
+    <div class="row adv-only"><label>Invert</label><select id="ch${n}.invert"><option value="false">Off</option><option value="true">On</option></select></div>
+    <div class="row adv-only"><label>BW 20M</label><select id="ch${n}.bwlimit"><option value="false">Off</option><option value="true">On</option></select></div>
+    <div class="row adv-only"><label>Vernier</label><select id="ch${n}.vernier"><option value="false">Off</option><option value="true">On</option></select></div>
+    <div class="row adv-only"><label>Fine V/div</label><input type="number" id="fine${n}" step="any" title="Exact volts/div; turn Vernier on for values between the 1-2-5 steps"></div>`);
 }
 for (const n of [1, 2]) for (const v of VDIV) document.getElementById(`ch${n}.scale`).add(new Option(fmt(v, 'V'), v));
 for (const v of TDIV) document.getElementById('time.scale').add(new Option(fmt(v, 's'), v));
@@ -155,7 +188,7 @@ function setControl(name, value) {
   const el = document.getElementById(name);
   if (!el || !['SELECT', 'INPUT'].includes(el.tagName) || value == null || document.activeElement === el) return;
   if (el.tagName === 'INPUT') { el.value = +(+value).toPrecision(4); return; }
-  const s = String(value).toUpperCase().replace(/\s/g, '');
+  const s = String(value).toUpperCase().replace(/[^A-Z0-9.]/g, '');
   let best = null;
   for (const o of el.options) {
     const ov = o.value.toUpperCase();
@@ -168,10 +201,11 @@ let autoSnap = null;
 const settingsOf = s => JSON.stringify(Object.entries(s).filter(([k]) => k !== 'idn' && k !== 'trig.status').sort());
 function autoOff() { autoSnap = null; document.getElementById('autoBtn').classList.remove('lit'); }
 
-async function loadState() {
-  st = await api('/api/state');
+async function loadState(full = true) {
+  st = { ...st, ...await api('/api/state?full=' + (full ? 1 : 0)) };
   document.getElementById('idn').textContent = st.idn;
   for (const [k, v] of Object.entries(st)) setControl(k, v);
+  for (const n of [1, 2]) setControl('fine' + n, st[`ch${n}.scale`]);
   if (autoSnap && settingsOf(st) !== autoSnap) autoOff();      // changed on the scope itself
 }
 document.getElementById('autoBtn').onclick = async () => {
@@ -209,6 +243,15 @@ function draw(w) {
   g.strokeStyle = '#323a4e'; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
   if (!w) return;
   const toY = (v, c) => H / 2 - (v + c.offset) / c.scale * dy;
+  if (/^X/.test(String(st['time.format'] || '').toUpperCase()) && w.ch[1] && w.ch[2]) {   // X-Y: CH1 across, CH2 up
+    const a = w.ch[1], b = w.ch[2];
+    g.strokeStyle = '#7ee0a8'; g.lineWidth = 2; g.beginPath();
+    a.v.forEach((v, i) => { const x = W / 2 + (v + a.offset) / a.scale * dx, y = toY(b.v[i], b); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+    g.font = '18px system-ui'; g.fillStyle = '#d8dbe3';
+    g.fillText(`X: CH1 ${fmt(a.scale, 'V')}/div   Y: CH2 ${fmt(b.scale, 'V')}/div`, 24, 26);
+    return;
+  }
   for (const [n, c] of Object.entries(w.ch)) {
     g.strokeStyle = COLORS[n]; g.lineWidth = 2; g.beginPath();
     c.v.forEach((v, i) => { const x = i * W / c.v.length, y = toY(v, c); i ? g.lineTo(x, y) : g.moveTo(x, y); });
@@ -231,6 +274,7 @@ function draw(w) {
   g.font = '18px system-ui'; let x = 24;
   for (const [n, c] of Object.entries(w.ch)) { g.fillStyle = COLORS[n]; g.fillText(`CH${n} ${fmt(c.scale, 'V')}/div`, x, 26); x += 170; }
   g.fillStyle = '#d8dbe3'; g.textAlign = 'right'; g.fillText(`${fmt(w.tscale, 's')}/div`, W - 24, 26); g.textAlign = 'left';
+  drawCursors(w);
 }
 
 // "Remote" toggle: the scope locks its buttons on every remote command, so while the user works
@@ -278,10 +322,13 @@ async function measureLoop() {
   for (;;) {
     if (panelFree) { await idle(); continue; }
     try {
-      const m = await api('/api/measure');
+      const keys = measKeys();
+      const m = await api('/api/measure?keys=' + keys.join(','));
+      const show = (k, x) => x == null ? '-' : MEAS[k][1] === '%' ? +x.toPrecision(3) + ' %' : fmt(x, MEAS[k][1]);
       for (const n of [1, 2]) {
         const v = m[n];
-        document.getElementById('m' + n).textContent = v ? `CH${n}  Vpp ${fmt(v.vpp, 'V')}   Vavg ${fmt(v.vavg, 'V')}   Freq ${fmt(v.freq, 'Hz')}` : `CH${n} off`;
+        document.getElementById('m' + n).textContent = !v ? `CH${n} off` :
+          `CH${n}  ` + keys.map(k => `${MEAS[k][0]} ${show(k, v[k])}`).join('   ');
       }
     } catch (e) { /* the wave loop reports errors */ }
     await new Promise(r => setTimeout(r, 2000));
@@ -298,6 +345,99 @@ document.getElementById('saveCsv').onclick = () => {
   for (let i = 0; i < n; i++) rows.push([((i - n / 2) * last.dt + last.toffset).toExponential(5), ...chs.map(c => last.ch[c].v[i])].join(','));
   download(`scope-${stamp()}.csv`, new Blob([rows.join('\n')], { type: 'text/csv' }));
 };
+
+// ---- Basic / Advanced: remembered per browser ----
+const advBtn = document.getElementById('advBtn');
+function setAdvanced(on) {
+  document.body.classList.toggle('adv', on); advBtn.classList.toggle('lit', on);
+  try { localStorage.setItem('rigolweb.advanced', on ? '1' : '0'); } catch (e) { /* storage blocked: just not remembered */ }
+  if (last && !panelFree) draw(last);
+}
+advBtn.onclick = () => setAdvanced(!document.body.classList.contains('adv'));
+try { setAdvanced(localStorage.getItem('rigolweb.advanced') === '1'); } catch (e) { setAdvanced(false); }
+
+// fine volts/div: any value; the scope only keeps it between the 1-2-5 steps while Vernier is on
+for (const n of [1, 2]) document.getElementById('fine' + n).addEventListener('change', async e => {
+  try {
+    const r = await api('/api/set', { name: `ch${n}.scale`, value: e.target.value });
+    Object.assign(st, r); setControl(`ch${n}.scale`, r[`ch${n}.scale`]); setControl('fine' + n, r[`ch${n}.scale`]); autoOff(); showErr();
+  } catch (err) { showErr(err); }
+});
+
+// ---- measurements: which ones the line under the screen shows (both channels), remembered per browser ----
+const MEAS = {
+  vpp: ['Vpp', 'V'], vmax: ['Vmax', 'V'], vmin: ['Vmin', 'V'], vamp: ['Vamp', 'V'], vtop: ['Vtop', 'V'],
+  vbase: ['Vbase', 'V'], vavg: ['Vavg', 'V'], vrms: ['Vrms', 'V'], over: ['Overshoot', '%'], pres: ['Preshoot', '%'],
+  freq: ['Freq', 'Hz'], per: ['Period', 's'], rise: ['Rise', 's'], fall: ['Fall', 's'], pwid: ['+Width', 's'],
+  nwid: ['-Width', 's'], pdut: ['+Duty', '%'], ndut: ['-Duty', '%'], pdel: ['Delay rise', 's'], ndel: ['Delay fall', 's'],
+};
+const MEAS_DEFAULT = ['vpp', 'vavg', 'freq'];
+let measSel;
+try { measSel = JSON.parse(localStorage.getItem('rigolweb.measures')) || MEAS_DEFAULT; } catch (e) { measSel = MEAS_DEFAULT; }
+const measKeys = () => Object.keys(MEAS).filter(k => measSel.includes(k));
+document.getElementById('measChecks').innerHTML = Object.entries(MEAS).map(([k, [name]]) =>
+  `<label><input type="checkbox" value="${k}"${measSel.includes(k) ? ' checked' : ''}>${name}</label>`).join('');
+document.getElementById('measChecks').addEventListener('change', () => {
+  measSel = [...document.querySelectorAll('#measChecks input:checked')].map(i => i.value);
+  try { localStorage.setItem('rigolweb.measures', JSON.stringify(measSel)); } catch (e) { /* not remembered */ }
+});
+
+// ---- cursors: computed in the browser from the screen data; positions are fractions of the screen ----
+const cur = { t1: 0.35, t2: 0.65, v1: 0.35, v2: 0.65 };
+let curDrag = null;
+const curMode = () => document.getElementById('curMode').value;
+const cursorsOn = () => curMode() !== 'off' && document.body.classList.contains('adv');
+function drawCursors(w) {
+  if (!cursorsOn()) return;
+  const m = curMode(), W = cv.width, H = cv.height, n = document.getElementById('curCh').value, c = w.ch[n];
+  const tAt = f => (f - 0.5) * GRID_X * w.tscale + w.toffset;                   // seconds from the trigger
+  const vAt = f => (0.5 - f) * GRID_Y * c.scale - c.offset;                     // volts on the chosen channel
+  const lines = [];
+  g.save(); g.setLineDash([8, 6]); g.lineWidth = 1.5; g.strokeStyle = '#e0e0e0';
+  if (m.includes('t')) for (const k of ['t1', 't2']) { const x = cur[k] * W; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); }
+  if (m.includes('v') && c) {
+    g.strokeStyle = COLORS[n];
+    for (const k of ['v1', 'v2']) { const y = cur[k] * H; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+  }
+  g.restore();
+  if (m.includes('t')) {
+    const dt = tAt(cur.t2) - tAt(cur.t1);
+    lines.push(`T1 ${fmt(tAt(cur.t1), 's')}   T2 ${fmt(tAt(cur.t2), 's')}`);
+    lines.push(`dT ${fmt(dt, 's')}   1/dT ${dt ? fmt(1 / Math.abs(dt), 'Hz') : '-'}`);
+  }
+  if (m.includes('v') && c) {
+    lines.push(`CH${n}  V1 ${fmt(vAt(cur.v1), 'V')}   V2 ${fmt(vAt(cur.v2), 'V')}   dV ${fmt(vAt(cur.v1) - vAt(cur.v2), 'V')}`);
+  }
+  document.getElementById('curOut').textContent = lines.length ? lines.join('\n') : 'Drag the dashed lines on the screen';
+  if (!lines.length) return;
+  // the same numbers on the screen, so a saved PNG carries them
+  const bh = lines.length * 22 + 10;
+  g.font = '17px system-ui'; g.fillStyle = 'rgba(5,6,10,.8)'; g.fillRect(16, H - bh - 12, 520, bh);
+  g.fillStyle = '#e0e0e0'; lines.forEach((t, i) => g.fillText(t, 26, H - bh + 14 + i * 22));
+}
+function canvasPos(e) {
+  const r = cv.getBoundingClientRect();
+  return { fx: (e.clientX - r.left) / r.width, fy: (e.clientY - r.top) / r.height, px: 10 / r.width, py: 10 / r.height };
+}
+cv.addEventListener('mousedown', e => {
+  if (!cursorsOn()) return;
+  const m = curMode(), p = canvasPos(e), cands = [];
+  if (m.includes('t')) for (const k of ['t1', 't2']) cands.push([k, Math.abs(cur[k] - p.fx) / p.px]);
+  if (m.includes('v')) for (const k of ['v1', 'v2']) cands.push([k, Math.abs(cur[k] - p.fy) / p.py]);
+  cands.sort((a, b) => a[1] - b[1]);
+  if (cands.length && cands[0][1] <= 1) { curDrag = cands[0][0]; cv.classList.add('dragging'); e.preventDefault(); }
+});
+window.addEventListener('mousemove', e => {
+  if (!curDrag) return;
+  const p = canvasPos(e);
+  cur[curDrag] = Math.min(1, Math.max(0, curDrag[0] === 't' ? p.fx : p.fy));
+  if (last) draw(last);
+});
+window.addEventListener('mouseup', () => { curDrag = null; cv.classList.remove('dragging'); });
+for (const id of ['curMode', 'curCh']) document.getElementById(id).addEventListener('change', () => {
+  if (last && !panelFree) draw(last);
+  if (!cursorsOn()) document.getElementById('curOut').textContent = 'Drag the dashed lines on the screen';
+});
 
 // ---- presets: named snapshots of the control values, kept in this browser's localStorage ----
 const PRESET_KEY = 'rigolweb.presets';
@@ -347,7 +487,7 @@ function drawLocal() {
 drawLocal();
 waveLoop(); measureLoop();
 // a full state read is ~20 queries (2+ s on this scope), so only now and then to catch front panel changes
-setInterval(() => { if (!panelFree) loadState().catch(() => {}); }, 15000);
+setInterval(() => { if (!panelFree) loadState(false).catch(() => {}); }, 15000);
 </script>
 </body>
 </html>

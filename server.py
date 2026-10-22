@@ -40,6 +40,23 @@ SETTINGS = {
     "acq.type":     (":ACQ:TYPE {}", ":ACQ:TYPE?", "str"),
 }
 
+# Shown only in the page's Advanced mode. Read on page load and with presets, not on the periodic refresh.
+ADV_SETTINGS = {
+    "ch1.invert":   (":CHAN1:INV {}", ":CHAN1:INV?", "onoff"),
+    "ch1.bwlimit":  (":CHAN1:BWLIMIT {}", ":CHAN1:BWLIMIT?", "onoff"),
+    "ch1.vernier":  (":CHAN1:VERN {}", ":CHAN1:VERN?", "onoff"),
+    "ch2.invert":   (":CHAN2:INV {}", ":CHAN2:INV?", "onoff"),
+    "ch2.bwlimit":  (":CHAN2:BWLIMIT {}", ":CHAN2:BWLIMIT?", "onoff"),
+    "ch2.vernier":  (":CHAN2:VERN {}", ":CHAN2:VERN?", "onoff"),
+    "time.format":  (":TIM:FORM {}", ":TIM:FORM?", "str"),
+    "trig.coupling": (":TRIG:EDGE:COUP {}", ":TRIG:EDGE:COUP?", "str"),
+    "trig.holdoff": (":TRIG:HOLDOFF {}", ":TRIG:HOLDOFF?", "float"),
+    "trig.sensitivity": (":TRIG:EDGE:SENS {}", ":TRIG:EDGE:SENS?", "float"),
+    "acq.averages": (":ACQ:AVER {}", ":ACQ:AVER?", "int"),
+    "acq.memdepth": (":ACQ:MEMDEPTH {}", ":ACQ:MEMDEPTH?", "str"),
+}
+ALL_SETTINGS = {**SETTINGS, **ADV_SETTINGS}
+
 ACTIONS = {
     "run":    [":RUN"],
     "stop":   [":STOP"],
@@ -54,7 +71,13 @@ ACTIONS = {
 # instead of asking the scope each frame; /api/state refreshes it (also catches front panel changes).
 cache = {}
 
-MEASURES = {"vpp": ":MEAS:VPP? CHAN{}", "vavg": ":MEAS:VAV? CHAN{}", "freq": ":MEAS:FREQ? CHAN{}"}
+# Automatic measurements the scope can make; the page picks which ones to show.
+MEASURES = {
+    "vpp": "VPP", "vmax": "VMAX", "vmin": "VMIN", "vamp": "VAMP", "vtop": "VTOP", "vbase": "VBAS",
+    "vavg": "VAV", "vrms": "VRMS", "over": "OVER", "pres": "PRES", "freq": "FREQ", "per": "PER",
+    "rise": "RIS", "fall": "FALL", "pwid": "PWID", "nwid": "NWID", "pdut": "PDUT", "ndut": "NDUT",
+    "pdel": "PDEL", "ndel": "NDEL",
+}
 
 
 class ScopeOffline(Exception):
@@ -169,6 +192,11 @@ def parse_value(kind, text):
             return None
     if kind == "onoff":
         return text.upper() in ("1", "ON")
+    if kind == "int":
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
     return text
 
 
@@ -177,6 +205,8 @@ def format_value(kind, value):
         return "ON" if value in (True, 1, "1", "ON", "on") else "OFF"
     if kind == "float":
         return f"{float(value):g}"
+    if kind == "int":
+        return str(int(float(value)))
     return str(value).upper()
 
 
@@ -220,17 +250,17 @@ def index():
 
 
 @app.get("/api/state")
-def state():
-    for name, (_, q, kind) in SETTINGS.items():
+def state(full: bool = True):
+    for name, (_, q, kind) in (ALL_SETTINGS if full else SETTINGS).items():
         cache[name] = parse_value(kind, scope.query(q))
     return {"idn": scope.idn, **cache, "trig.status": scope.query(":TRIG:STAT?")}
 
 
 @app.post("/api/set")
 def set_value(req: SetReq):
-    if req.name not in SETTINGS:
+    if req.name not in ALL_SETTINGS:
         raise HTTPException(400, "unknown setting")
-    w, q, kind = SETTINGS[req.name]
+    w, q, kind = ALL_SETTINGS[req.name]
     scope.write(w.format(format_value(kind, req.value)))
     cache[req.name] = parse_value(kind, scope.query(q))
     return {req.name: cache[req.name]}
@@ -238,8 +268,8 @@ def set_value(req: SetReq):
 
 @app.post("/api/apply")
 def apply(values: dict):
-    """Apply a saved preset: write every known setting in SETTINGS order, then read the state back."""
-    for name, (w, _, kind) in SETTINGS.items():
+    """Apply a saved preset: write every known setting in ALL_SETTINGS order, then read the state back."""
+    for name, (w, _, kind) in ALL_SETTINGS.items():
         if name in values and values[name] is not None:
             scope.write(w.format(format_value(kind, values[name])))
     return state()
@@ -274,12 +304,13 @@ def wave():
 
 
 @app.get("/api/measure")
-def measure():
+def measure(keys: str = "vpp,vavg,freq"):
+    wanted = [k for k in keys.split(",") if k in MEASURES]
     out = {}
     for ch in (1, 2):
         if not cache.get(f"ch{ch}.display", True):
             continue
-        out[ch] = {k: read_measure(scope.query(q.format(ch))) for k, q in MEASURES.items()}
+        out[ch] = {k: read_measure(scope.query(f":MEAS:{MEASURES[k]}? CHAN{ch}")) for k in wanted}
     return out
 
 
