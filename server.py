@@ -20,6 +20,7 @@ from pydantic import BaseModel
 # back-to-back waveform reads are fine with a tiny gap. --gap overrides the small one.
 CMD_GAP_S = 0.01
 WAVE_AFTER_SET_S = 0.12
+WRITE_GAP_S = 0.12      # setting commands sent faster than this get dropped or garbled (a preset is ~20 in a row)
 STATUS_EVERY = 3        # ask for the trigger status only every few frames
 WAVE_POINTS = 600       # "normal" points mode returns the 600 on-screen samples
 SCREEN_DIVS_X = 12
@@ -152,15 +153,15 @@ class Scope:
             pass
         self.dev = None
 
-    def _gap(self):
-        wait = CMD_GAP_S - (time.monotonic() - self.last)
+    def _gap(self, gap=None):
+        wait = (CMD_GAP_S if gap is None else gap) - (time.monotonic() - self.last)
         if wait > 0:
             time.sleep(wait)
 
-    def _io(self, fn):
+    def _io(self, fn, gap=None):
         with self.lock:
             self._connect()
-            self._gap()
+            self._gap(gap)
             try:
                 self.locked = True
                 return fn(self.dev)
@@ -171,7 +172,7 @@ class Scope:
                 self.last = time.monotonic()
 
     def write(self, cmd):
-        self._io(lambda d: d.write(cmd))
+        self._io(lambda d: d.write(cmd), WRITE_GAP_S)
         self.changed = time.monotonic()
 
     def query(self, cmd):

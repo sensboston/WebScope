@@ -15,7 +15,8 @@
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
   header .idn { color: var(--muted); font-size: 12px; }
   header .status { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
-  .badge { padding: 2px 8px; border-radius: 10px; background: var(--line); }
+  /* fixed width, so RUN / WAIT / OFFLINE don't shift the header buttons */
+  .badge { display: inline-block; width: 74px; text-align: center; padding: 2px 0; border-radius: 10px; background: var(--line); }
   .badge.stop { background: var(--danger); color: #fff; }
   main { display: grid; grid-template-columns: 1fr 420px; gap: 12px; padding: 12px; height: calc(100vh - 46px); }
   main > section { min-width: 0; display: flex; flex-direction: column; }
@@ -55,7 +56,16 @@
   .err { color: var(--danger); font-size: 12px; min-height: 1em; }
   /* Basic / Advanced: advanced rows and blocks are hidden unless body.adv */
   body:not(.adv) .adv-only { display: none !important; }
-  header #advBtn { padding: 3px 10px; font-size: 12px; }
+  header #advBtn, header #snapBtn { padding: 3px 10px; font-size: 12px; }
+  .snaplist { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 6px; }
+  .snap { position: relative; flex: none; width: 152px; cursor: pointer; border: 1px solid var(--line); border-radius: 6px; padding: 2px; background: var(--bg); }
+  .snap:hover { border-color: #4a5268; } .snap.sel { border-color: var(--accent); }
+  .snap canvas { display: block; width: 146px; height: 97px; border-radius: 4px; }
+  .snap .cap { font-size: 11px; color: var(--muted); padding: 2px 3px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .snap .trash { position: absolute; top: 5px; right: 5px; padding: 3px; line-height: 0; background: rgba(16,18,24,.85); opacity: 0; }
+  .snap:hover .trash { opacity: 1; } .snap .trash:hover { background: var(--danger); }
+  .snap .trash svg { width: 14px; height: 14px; }
+  button.stopped { background: var(--danger); color: #fff; }
   .checks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px 8px; margin-top: 4px; font-size: 12px; }
   .checks label { display: flex; gap: 4px; align-items: center; color: var(--text); white-space: nowrap; }
   /* one fixed-height line each, so changing numbers never move the controls */
@@ -70,8 +80,9 @@
 <header>
   <h1>Rigol Web Panel</h1>
   <span class="idn" id="idn">connecting...</span>
-  <span class="status"><button id="advBtn" title="Show the advanced settings">Advanced</button>
-    <span class="badge" id="tstat">-</span> <span id="fps"></span></span>
+  <span class="status"><button id="snapBtn" class="primary" title="Save what is on the screen (key S)">Snapshot</button>
+    <button id="advBtn" title="Show the advanced settings">Advanced</button>
+    <span class="badge" id="tstat">-</span></span>
 </header>
 <main>
   <section>
@@ -86,8 +97,8 @@
     <fieldset class="wide">
       <legend>Run control</legend>
       <div class="buttons one-line">
-        <button class="primary" data-act="run">Run</button>
-        <button data-act="stop">Stop</button>
+        <button id="runBtn" data-act="run">Run</button>
+        <button id="stopBtn" data-act="stop">Stop</button>
         <button data-act="single">Single</button>
         <button data-act="force">Force trig</button>
         <button id="autoBtn" title="Let the scope pick the settings; stays green until something is changed">Auto</button>
@@ -154,6 +165,10 @@
       <div class="readout" id="curOut">Drag the dashed lines on the screen</div>
     </fieldset>
     <fieldset class="wide">
+      <legend>Snapshots</legend>
+      <div class="snaplist" id="snapList"></div>
+    </fieldset>
+    <fieldset class="wide">
       <legend>Presets</legend>
       <div class="row"><select id="presetList"></select>
         <button class="small" id="presetLoad">Load</button><button class="small" id="presetDel">Delete</button></div>
@@ -170,7 +185,7 @@ for (let e = -9; e <= 1; e++) for (const m of [1, 2, 5]) { const v = m * 10 ** e
 const COLORS = { 1: '#f2e632', 2: '#4cc9f0' };
 const GRID_X = 12, GRID_Y = 8;
 const cv = document.getElementById('scr'), g = cv.getContext('2d');
-let st = {}, last = null, frames = 0, fpsT = performance.now();
+let st = {}, last = null;
 
 const fmt = (v, unit) => {
   if (v == null) return '-';
@@ -310,11 +325,17 @@ document.getElementById('panelBtn').onclick = async () => {
   panelFree = !panelFree;
   document.getElementById('panelBtn').classList.toggle('lit', !panelFree);
   document.getElementById('tstat').textContent = panelFree ? 'LOCAL' : '-';
-  if (panelFree) { await new Promise(r => setTimeout(r, 1200)); await api('/api/action/local', {}).catch(showErr); drawLocal(); }
+  if (panelFree) { await new Promise(r => setTimeout(r, 1200)); await api('/api/action/local', {}).catch(showErr); if (!deep) drawLocal(); }
   else loadState().catch(showErr);           // pick up whatever was changed on the scope meanwhile
 };
 
 let offline = false, connId = null;
+// Run blue while acquiring, Stop red while stopped; neither lit when the page is not driving the scope
+function showRunState(status) {
+  const stopped = status != null && /STOP/i.test(status);
+  document.getElementById('runBtn').classList.toggle('primary', status != null && !stopped);
+  document.getElementById('stopBtn').classList.toggle('stopped', stopped);
+}
 function setLocal() {
   panelFree = true;
   document.getElementById('panelBtn').classList.remove('lit');
@@ -334,15 +355,14 @@ async function waveLoop() {
       last = w;
       draw(last);
       const b = document.getElementById('tstat'); b.textContent = last.status; b.classList.toggle('stop', /STOP/i.test(last.status));
-      frames++; showErr();
+      showRunState(last.status);
+      showErr();
       if (offline) { offline = false; loadState().catch(() => {}); }   // back: settings may have changed
     } catch (e) {
       showErr(e);
       if (e.status === 503) { offline = true; document.getElementById('tstat').textContent = 'OFFLINE'; }
       await new Promise(r => setTimeout(r, 1000));
     }
-    const now = performance.now();
-    if (now - fpsT > 2000) { document.getElementById('fps').textContent = (frames * 1000 / (now - fpsT)).toFixed(1) + ' fps'; frames = 0; fpsT = now; }
   }
 }
 let lastMeas = null;
@@ -360,19 +380,22 @@ function fitScreen() {
 new ResizeObserver(fitScreen).observe(screenBox);
 window.addEventListener('resize', fitScreen);
 
+function showMeas() {
+  for (const n of [1, 2]) {
+    const v = lastMeas && lastMeas.m[n];
+    document.getElementById('m' + n).innerHTML = !v ? '<span class="chip off">off</span>' :
+      lastMeas.keys.map(k => `<span class="chip c${n}">${MEAS[k][0]}<b>${measText(k, v[k])}</b></span>`).join('');
+  }
+  fitScreen();
+}
 async function measureLoop() {
   for (;;) {
-    if (panelFree) { await idle(); continue; }
+    if (panelFree || deep) { await idle(); continue; }
     try {
       const keys = measKeys();
       const m = await api('/api/measure?keys=' + keys.join(','));
       lastMeas = { keys, m };
-      for (const n of [1, 2]) {
-        const v = m[n];
-        document.getElementById('m' + n).innerHTML = !v ? '<span class="chip off">off</span>' :
-          keys.map(k => `<span class="chip c${n}">${MEAS[k][0]}<b>${measText(k, v[k])}</b></span>`).join('');
-      }
-      fitScreen();
+      showMeas();
     } catch (e) { /* the wave loop reports errors */ }
     await new Promise(r => setTimeout(r, 2000));
   }
@@ -402,7 +425,8 @@ document.getElementById('savePng').onclick = () => {
     }
   });
   o.fillStyle = '#8a90a0';
-  o.fillText(new Date().toLocaleString(), 26, cv.height + pad + rows.length * lineH + lineH / 2);
+  const when = snapView ? new Date(snapView.time) : new Date();
+  o.fillText(when.toLocaleString() + (snapView && snapView.note ? '   ' + snapView.note : ''), 26, cv.height + pad + rows.length * lineH + lineH / 2);
   out.toBlob(b => download(`scope-${stamp()}.png`, b));
 };
 document.getElementById('saveCsv').onclick = () => {
@@ -585,6 +609,7 @@ const deepMsg = t => { document.getElementById('deepOut').textContent = t; };
 document.getElementById('deepBtn').onclick = async () => {
   if (panelFree) { showErr(new Error('Press Remote first')); return; }
   deepMsg('reading...');
+  if (snapView) closeSnap();
   try {
     const r = await api('/api/deep', {});
     const ch = {};
@@ -605,8 +630,11 @@ document.getElementById('deepBtn').onclick = async () => {
 };
 document.getElementById('liveBtn').onclick = async () => {
   if (!deep) return;
+  const wasSnap = !!snapView;
   deep = null; deepMsg('');
-  try { await api('/api/action/run', {}); } catch (e) { showErr(e); }
+  if (wasSnap) closeSnap();
+  if (panelFree) { drawLocal(); return; }
+  if (!wasSnap) try { await api('/api/action/run', {}); } catch (e) { showErr(e); }   // a capture stopped the scope
 };
 
 // time of sample i: t = 0 sits at index n/2 - 1 when the delay is zero
@@ -733,6 +761,137 @@ document.getElementById('fftCh').addEventListener('change', () => {
   if (deep) renderDeep(); else if (last && !panelFree) draw(last);
 });
 
+// ---- snapshots: the data behind the screen (points, settings, measurements), kept in this browser's IndexedDB.
+// Viewing one reuses the deep-capture viewer, so zoom, cursors, FFT, PNG and CSV all work on it.
+const SNAP_DB = 'rigolweb', SNAP_STORE = 'snapshots';
+let snapView = null;              // the snapshot on screen, or null
+function snapDb() {
+  return new Promise((ok, bad) => {
+    const rq = indexedDB.open(SNAP_DB, 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore(SNAP_STORE, { keyPath: 'id' });
+    rq.onsuccess = () => ok(rq.result); rq.onerror = () => bad(rq.error);
+  });
+}
+async function snapTx(mode, fn) {
+  const db = await snapDb();
+  return new Promise((ok, bad) => {
+    const tx = db.transaction(SNAP_STORE, mode), st0 = tx.objectStore(SNAP_STORE), rq = fn(st0);
+    tx.oncomplete = () => ok(rq && rq.result); tx.onerror = () => bad(tx.error);
+  });
+}
+const snapAll = () => snapTx('readonly', s => s.getAll());
+const snapPut = s => snapTx('readwrite', st0 => st0.put(s));
+const snapDel = id => snapTx('readwrite', st0 => st0.delete(id));
+const controlValues = () => {
+  const out = {};
+  for (const id of SETTING_IDS) { const v = document.getElementById(id).value; out[id] = v === 'true' ? true : v === 'false' ? false : v; }
+  return out;
+};
+
+async function takeSnapshot() {
+  let data;
+  if (deep) data = { dt: deep.dt, n: deep.n, toffset: deep.toffset, ch: deep.ch };   // a capture or a snapshot on screen
+  else if (last && !panelFree) {                     // live screen: 600 points over 12 divisions
+    const ch = {};
+    for (const [k, c] of Object.entries(last.ch)) ch[k] = { v: Float32Array.from(c.v), scale: c.scale, offset: c.offset };
+    const n = Object.values(ch)[0]?.v.length || 0;
+    data = { dt: last.tscale * GRID_X / Math.max(1, n), n, toffset: last.toffset, ch };
+  }
+  if (!data || !data.n) { showErr(new Error('Nothing to save: press Remote first')); return; }
+  const snap = { id: Date.now(), time: new Date().toISOString(), note: '', data, meas: lastMeas,
+                 settings: { ...st }, controls: controlValues(), deep: data.n > 600 };
+  try { await snapPut(snap); flashSnap(); await listSnaps(snap.id); } catch (e) { showErr(e); }
+}
+function flashSnap() {
+  const b = document.getElementById('snapBtn'); b.classList.add('lit'); b.textContent = 'Saved';
+  setTimeout(() => { b.classList.remove('lit'); snapBtnLabel(); }, 900);
+}
+document.getElementById('snapBtn').onclick = () => snapView ? backToScope() : takeSnapshot();
+window.addEventListener('keydown', e => {
+  if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.metaKey && !e.altKey && !/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) {
+    e.preventDefault(); snapView ? backToScope() : takeSnapshot();
+  }
+});
+
+// small picture of a snapshot, drawn from its data
+function snapThumb(s) {
+  const c = document.createElement('canvas'); c.width = 150; c.height = 100;
+  const t = c.getContext('2d'), W = c.width, H = c.height;
+  t.fillStyle = '#05060a'; t.fillRect(0, 0, W, H);
+  t.strokeStyle = '#1f2533'; t.lineWidth = 1;
+  for (let i = 1; i < 12; i++) { t.beginPath(); t.moveTo(i * W / 12, 0); t.lineTo(i * W / 12, H); t.stroke(); }
+  for (let i = 1; i < 8; i++) { t.beginPath(); t.moveTo(0, i * H / 8); t.lineTo(W, i * H / 8); t.stroke(); }
+  // min and max of each pixel column, so pulses one or two samples wide still show
+  for (const [k, ch] of Object.entries(s.data.ch)) {
+    const n = ch.v.length, yOf = v => H / 2 - (v + ch.offset) / ch.scale * H / 8;
+    t.strokeStyle = COLORS[k]; t.lineWidth = 1.2; t.beginPath();
+    for (let px = 0; px < W; px++) {
+      const a = Math.floor(px * n / W), b = Math.max(a + 1, Math.floor((px + 1) * n / W));
+      let lo = Infinity, hi = -Infinity;
+      for (let i = a; i < b && i < n; i++) { if (ch.v[i] < lo) lo = ch.v[i]; if (ch.v[i] > hi) hi = ch.v[i]; }
+      px ? t.lineTo(px, yOf(lo)) : t.moveTo(px, yOf(lo));
+      t.lineTo(px, yOf(hi));
+    }
+    t.stroke();
+  }
+  return c;
+}
+async function listSnaps(selectId) {
+  const box = document.getElementById('snapList');
+  let snaps = [];
+  try { snaps = (await snapAll()).sort((a, b) => b.id - a.id); } catch (e) { box.textContent = 'storage unavailable'; return; }
+  box.innerHTML = '';
+  if (!snaps.length) { box.innerHTML = '<span class="muted">No snapshots yet: press Snapshot or S</span>'; return; }
+  for (const s of snaps) {
+    const item = document.createElement('div');
+    item.className = 'snap' + (snapView && snapView.id === s.id || selectId === s.id ? ' sel' : '');
+    item.title = 'Show this snapshot';
+    const d = new Date(s.time);
+    item.append(snapThumb(s));
+    const cap = document.createElement('div'); cap.className = 'cap';
+    cap.textContent = `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString()}${s.deep ? ' · deep' : ''}`;
+    item.append(cap);
+    const del = document.createElement('button');
+    del.className = 'trash'; del.title = 'Delete this snapshot';
+    del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>';
+    del.onclick = async e => {
+      e.stopPropagation();
+      try { await snapDel(s.id); } catch (err) { showErr(err); }
+      if (snapView && snapView.id === s.id) backToScope(); else listSnaps();
+    };
+    item.append(del);
+    item.onclick = () => snapView && snapView.id === s.id ? backToScope() : showSnap(s);   // click it again: back
+    box.append(item);
+  }
+}
+async function showSnap(s) {
+  snapView = s;
+  deep = { ch: s.data.ch, dt: s.data.dt, n: s.data.n, toffset: s.data.toffset };   // stops the live loops
+  view.c = s.data.toffset; view.span = s.data.n * s.data.dt;
+  if (s.data.n > 600) view.span = (s.settings['time.scale'] || view.span / GRID_X) * GRID_X;
+  lastMeas = s.meas || null; showMeas();
+  snapBtnLabel();
+  showRunState(null);
+  document.getElementById('tstat').textContent = 'SNAP';
+  renderDeep(); listSnaps();
+  if (!panelFree) api('/api/action/local', {}).catch(() => {});    // the scope's own buttons are free meanwhile
+}
+function closeSnap() {
+  snapView = null; snapBtnLabel(); listSnaps();
+}
+// one header button: "Snapshot" on the scope, "Scope" (back to it) while a snapshot is shown
+function snapBtnLabel() {
+  const b = document.getElementById('snapBtn');
+  b.textContent = snapView ? 'Scope' : 'Snapshot';
+  b.title = snapView ? 'Back to the live scope (Esc)' : 'Save what is on the screen (key S)';
+}
+function backToScope() {
+  deep = null; deepMsg(''); closeSnap();
+  if (panelFree) drawLocal();
+}
+window.addEventListener('keydown', e => { if (e.key === 'Escape' && snapView) backToScope(); });
+listSnaps();
+
 // ---- presets: named snapshots of the control values, kept in this browser's localStorage ----
 const PRESET_KEY = 'rigolweb.presets';
 const SETTING_IDS = [...document.querySelectorAll('aside select[id*="."], aside input[id*="."]')].map(el => el.id);
@@ -777,11 +936,12 @@ function drawLocal() {
   g.fillText('Press Remote to drive it from here', cv.width / 2, cv.height / 2 + 24);
   g.textAlign = 'left';
   document.getElementById('tstat').textContent = 'LOCAL';
+  showRunState(null);
 }
 drawLocal();
 waveLoop(); measureLoop();
 // a full state read is ~20 queries (2+ s on this scope), so only now and then to catch front panel changes
-setInterval(() => { if (!panelFree) loadState(false).catch(() => {}); }, 15000);
+setInterval(() => { if (!panelFree && !deep) loadState(false).catch(() => {}); }, 15000);   // not while a snapshot or capture is shown
 </script>
 </body>
 </html>
