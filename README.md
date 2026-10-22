@@ -43,6 +43,7 @@ connection comes back by itself.
   follows a setting change (otherwise it can hang until power cycled), so the server keeps 0.12 s there
   and a tiny gap elsewhere: about 13 frames per second on fast timebases. On slow timebases the scope
   itself refreshes only once per sweep (12 divisions).
-- In remote mode the scope locks its front panel. "Release panel" (or stopping the server) unlocks it.
+- In remote mode the scope locks its front panel. The page starts in Local and drives the scope only
+  while "Remote" is on; the server unlocks the panel after 5 s without requests and when it stops.
 - Firmware 00.04.01 does not answer the screenshot query, so the screen is drawn from the waveform data.
 - Close UltraScope while the panel is running; both cannot hold the USB connection.
