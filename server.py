@@ -14,7 +14,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-CMD_GAP_S = 0.12        # the DS1000E drops commands sent closer than this (UltraScope uses the same gap)
+# UltraScope waits 0.12 s between all commands. In practice the DS1000E only needs it before reading a
+# waveform right after a setting changed (otherwise it can hang until power cycled); other commands and
+# back-to-back waveform reads are fine with a tiny gap. --gap overrides the small one.
+CMD_GAP_S = 0.01
+WAVE_AFTER_SET_S = 0.12
+STATUS_EVERY = 3        # ask for the trigger status only every few frames
 WAVE_POINTS = 600       # "normal" points mode returns the 600 on-screen samples
 SCREEN_DIVS_X = 12
 
@@ -104,6 +109,7 @@ class Scope:
         self.next_try = 0.0
         self.locked = False     # True after any command, until the front panel is given back
         self.conn_id = 0        # bumped on every (re)connect, so the page can tell the scope was power cycled
+        self.changed = 0.0      # time of the last command that may have changed a setting
         threading.Thread(target=self._idle_watch, daemon=True).start()
 
     def _idle_watch(self):
@@ -165,11 +171,16 @@ class Scope:
 
     def write(self, cmd):
         self._io(lambda d: d.write(cmd))
+        self.changed = time.monotonic()
 
     def query(self, cmd):
         return self._io(lambda d: d.query(cmd).strip())
 
     def query_raw(self, cmd):
+        wait = WAVE_AFTER_SET_S - (time.monotonic() - self.changed)
+        if wait > 0:
+            time.sleep(wait)
+
         def ask(d):
             d.write(cmd)
             return d.read_raw()
@@ -284,9 +295,17 @@ def action(name: str):
     return {"ok": True}
 
 
+frame_no = 0
+last_status = "-"
+
+
 @app.get("/api/wave")
 def wave():
-    status = scope.query(":TRIG:STAT?")      # first, so a reconnect (which clears the cache) happens here
+    global frame_no, last_status
+    frame_no += 1
+    if frame_no % STATUS_EVERY == 1 or not cache:
+        last_status = scope.query(":TRIG:STAT?")   # also where a reconnect (which clears the cache) happens
+    status = last_status
     if not cache:
         state()
     tscale, toffs = cache["time.scale"], cache["time.offset"]
@@ -315,11 +334,15 @@ def measure(keys: str = "vpp,vavg,freq"):
 
 
 def main():
+    global CMD_GAP_S
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--resource", default=None, help="VISA resource name (default: first Rigol found)")
+    ap.add_argument("--gap", type=float, default=None, help=f"seconds between commands (default {CMD_GAP_S})")
     args = ap.parse_args()
+    if args.gap is not None:
+        CMD_GAP_S = args.gap
     global scope
     scope = Scope(args.resource)
     print(f"Serving on http://{args.host}:{args.port}/", flush=True)
