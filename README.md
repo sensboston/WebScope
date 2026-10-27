@@ -1,5 +1,8 @@
 # WebScope
 
+<img width="1919" height="1078" alt="scope" src="https://github.com/user-attachments/assets/dcfe9df9-c203-4035-a09a-e6c2b65a3759" />
+
+
 A browser front panel for Rigol DS1000E/D oscilloscopes (DS1052E, DS1102E, ...) connected over USB.
 
 These scopes have no network port, and the vendor software (UltraScope) is hard to use. This is a
